@@ -85,8 +85,62 @@ app.post('/api/mission/upload', async (req, res) => {
   }
 });
 
-// Command stub route (to be expanded in later phases)
+// Command route mapping common text commands to MAVLink COMMAND_LONG ids
+const COMMAND_MAP = {
+  'arm': { command: 400, p1: 1 }, // MAV_CMD_COMPONENT_ARM_DISARM
+  'disarm': { command: 400, p1: 0 },
+  'rtl': { command: 20 }, // MAV_CMD_NAV_RETURN_TO_LAUNCH
+  'takeoff': { command: 22, p7: 10 } // MAV_CMD_NAV_TAKEOFF (default 10m alt)
+};
+
 app.post('/api/command/:cmd', async (req, res) => {
-  // In the future, proxy commands to python
-  res.json({ status: 'Command received but not implemented yet in Python', cmd: req.params.cmd });
+  const cmdStr = req.params.cmd.toLowerCase();
+  
+  if (COMMAND_MAP[cmdStr]) {
+    try {
+      const payload = {
+        command: COMMAND_MAP[cmdStr].command,
+        p1: COMMAND_MAP[cmdStr].p1 || 0,
+        p2: COMMAND_MAP[cmdStr].p2 || 0,
+        p3: COMMAND_MAP[cmdStr].p3 || 0,
+        p4: COMMAND_MAP[cmdStr].p4 || 0,
+        p5: COMMAND_MAP[cmdStr].p5 || 0,
+        p6: COMMAND_MAP[cmdStr].p6 || 0,
+        p7: COMMAND_MAP[cmdStr].p7 || 0,
+      };
+      const response = await axios.post(`${PYTHON_API_URL}/command`, payload);
+      res.json(response.data);
+    } catch (err) {
+      res.status(500).json({ error: 'Command failed in python backend', details: err.message });
+    }
+  } else {
+    res.status(400).json({ error: 'Unknown command shortcut' });
+  }
+});
+
+app.post('/api/mode', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/mode`, req.body);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to set mode', details: err.message });
+  }
+});
+
+app.post('/api/parameters/refresh', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/parameters/refresh`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to request parameters', details: err.message });
+  }
+});
+
+app.post('/api/parameters/set', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/parameters/set`, req.body);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to set parameter', details: err.message });
+  }
 });

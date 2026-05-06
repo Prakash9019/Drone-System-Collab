@@ -4,6 +4,7 @@ import { Activity, Map, Settings, PlaneTakeoff } from 'lucide-react';
 import useTelemetryStore from './store/useTelemetryStore';
 import FlightData from './pages/FlightData';
 import FlightPlanner from './pages/FlightPlanner';
+import Params from './pages/Params';
 import './index.css';
 
 function App() {
@@ -47,7 +48,7 @@ function App() {
             <Route path="/" element={<Navigate to="/flight-data" replace />} />
             <Route path="/flight-data" element={<FlightData />} />
             <Route path="/planner" element={<FlightPlanner />} />
-            <Route path="/setup" element={<div style={{padding: '20px'}}><h2>Setup & Tuning</h2></div>} />
+            <Route path="/setup" element={<Params />} />
           </Routes>
         </div>
       </div>

@@ -190,10 +190,70 @@ class LinkManager:
                         
                 # Attempt to reconnect if disconnected and auto
                 if self.original_connection_string.lower() == "auto":
-                    # For simplicity in this demo, we'll try to find it again
-                    pass
+                    detected = await auto_detect_connection()
+                    if detected:
+                        parts = detected.split(":")
+                        new_conn_str = parts[0]
+                        new_baud = int(parts[1]) if len(parts) > 1 else self.baudrate
+                        if self.conn:
+                            try:
+                                self.conn.close()
+                            except: pass
+                        logger.info(f"Auto-reconnecting to {new_conn_str}...")
+                        self.connection_string = new_conn_str
+                        self.baudrate = new_baud
+                        self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
                         
             await asyncio.sleep(1.0)
+
+    def send_command(self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0):
+        if not self.conn:
+            return False
+        try:
+            self.conn.mav.command_long_send(
+                sysid, compid,
+                command,
+                0, # confirmation
+                p1, p2, p3, p4, p5, p6, p7
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send command {command}: {e}")
+            return False
+
+    def set_mode(self, sysid: int, mode: str):
+        if not self.conn:
+            return False
+        # Get mode ID from pymavlink mode mapping
+        mode_id = self.conn.mode_mapping().get(mode)
+        if mode_id is None:
+            logger.error(f"Unknown mode: {mode}")
+            return False
+        try:
+            self.conn.mav.set_mode_send(
+                sysid,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                mode_id
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set mode {mode}: {e}")
+            return False
+
+    def fetch_parameters(self, sysid: int, compid: int):
+        if not self.conn: return False
+        self.conn.mav.param_request_list_send(sysid, compid)
+        return True
+
+    def set_parameter(self, sysid: int, compid: int, param_id: str, param_value: float, param_type: int = mavutil.mavlink.MAV_PARAM_TYPE_REAL32):
+        if not self.conn: return False
+        self.conn.mav.param_set_send(
+            sysid, compid,
+            param_id.encode('utf-8'),
+            param_value,
+            param_type
+        )
+        return True
 
     def close(self):
         self.running = False

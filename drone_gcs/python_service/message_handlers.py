@@ -96,3 +96,12 @@ def handle_message(msg: any, state: VehicleState):
             latency_ns = now_ns - msg.ts1
             if latency_ns > 0:
                 state.link_status.latency_ms = latency_ns / 1e6
+                
+    elif msg_type == 'PARAM_VALUE':
+        param_id = msg.param_id
+        if isinstance(param_id, bytes):
+            param_id = param_id.decode('utf-8').rstrip('\x00')
+        elif isinstance(param_id, str):
+            param_id = param_id.rstrip('\x00')
+            
+        state.parameters[param_id] = msg.param_value

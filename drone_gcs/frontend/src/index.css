@@ -327,3 +327,100 @@ body {
   color: var(--accent-red);
   background-color: rgba(239, 68, 68, 0.1);
 }
+/* HUD Artificial Horizon */
+.hud-container {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.8);
+  overflow: hidden;
+  background-color: #87CEEB;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+  z-index: 5;
+}
+
+.hud-horizon-clip {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  border-radius: 50%;
+}
+
+.hud-horizon-bg {
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  transform-origin: center center;
+  transition: transform 0.1s linear;
+}
+
+.hud-sky {
+  width: 100%;
+  height: 50%;
+  background-color: #3b82f6;
+}
+
+.hud-ground {
+  width: 100%;
+  height: 50%;
+  background-color: #8B4513;
+  border-top: 2px solid white;
+}
+
+.hud-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 2px;
+  background-color: yellow;
+  z-index: 10;
+}
+
+.hud-crosshair::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 2px;
+  height: 12px;
+  background-color: yellow;
+}
+
+.hud-readouts {
+  position: absolute;
+  bottom: -25px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  font-size: 0.75rem;
+  color: white;
+  background: rgba(0,0,0,0.5);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.mode-select {
+  background: transparent;
+  color: var(--accent-blue);
+  border: none;
+  font-size: 1.1rem;
+  font-family: monospace;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+}
+
+.mode-select option {
+  background: var(--bg-dark);
+  color: white;
+}

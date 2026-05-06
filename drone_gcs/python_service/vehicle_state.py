@@ -160,5 +160,6 @@ class VehicleState:
             "link_status": {
                 "packet_loss_percent": self.link_status.packet_loss_percent,
                 "latency_ms": self.link_status.latency_ms,
-            }
+            },
+            "parameters": self.parameters
         }
