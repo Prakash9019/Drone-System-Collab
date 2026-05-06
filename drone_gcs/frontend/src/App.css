@@ -1,0 +1,126 @@
+:root {
+  color-scheme: dark;
+  background: #0e1117;
+  color: #f3f4f6;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+body, html, #root {
+  margin: 0;
+  min-height: 100%;
+}
+
+.app-shell {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  margin-bottom: 24px;
+}
+
+h1 {
+  margin: 0 0 8px;
+}
+
+.panel {
+  background: #131924;
+  border: 1px solid #27303d;
+  border-radius: 18px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.form-row label {
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  border: 1px solid #324158;
+  background: #0d1622;
+  color: #f8fafc;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+code {
+  background: #0d1521;
+  color: #22c55e;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+button {
+  border: none;
+  border-radius: 12px;
+  padding: 12px 18px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status-box {
+  margin-top: 18px;
+  background: #0d1521;
+  border: 1px solid #1f2a44;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.telemetry-card {
+  background: #0f1724;
+  border: 1px solid #1f2937;
+  border-radius: 16px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.grid-item {
+  border: 1px solid #27303d;
+  border-radius: 14px;
+  padding: 12px;
+  background: #111827;
+}
+
+.key {
+  display: block;
+  font-size: 0.86rem;
+  color: #9ca3af;
+  margin-bottom: 6px;
+}
+
+.value {
+  font-size: 0.98rem;
+  font-weight: 700;
+}

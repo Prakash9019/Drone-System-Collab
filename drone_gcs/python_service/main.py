@@ -1,0 +1,93 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+import uvicorn
+from typing import List
+from mavlink_link import LinkManager
+from mission_manager import MissionManager
+from mission_models import MissionItem
+from telemetry_pub import TelemetryPublisher
+
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+link_manager = None
+mission_manager = None
+telemetry_publisher = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global link_manager, mission_manager, telemetry_publisher
+    logger.info("Starting up MAVLink Service...")
+    
+    # Use auto-detect by default to find serial ports, fallback to SITL if needed
+    # connection_string = "auto"
+    # connection_string = "udp:127.0.0.1:14550"
+
+    connection_string = "/dev/tty.SIYI-6801129585"
+    baudrate = 115200
+
+    udp_endpoints = ["udpout:127.0.0.1:14550"] # Example forwarding endpoint
+    
+    link_manager = LinkManager(
+        connection_string=connection_string,
+        baudrate=baudrate,
+        udp_forwarding_endpoints=[]
+    )
+    mission_manager = MissionManager(link_manager)
+    link_manager.mission_manager = mission_manager
+    
+    # Setup ZMQ Telemetry Publisher
+    telemetry_publisher = TelemetryPublisher(port=5556)
+    telemetry_publisher.start()
+    
+    asyncio.create_task(link_manager.connect())
+    asyncio.create_task(telemetry_publisher.publish_loop(link_manager))
+    
+    yield
+    
+    logger.info("Shutting down MAVLink Service...")
+    if telemetry_publisher:
+        telemetry_publisher.stop()
+    if link_manager:
+        link_manager.close()
+
+app = FastAPI(lifespan=lifespan, title="Drone GCS Python Service")
+
+class MissionUploadRequest(BaseModel):
+    items: List[MissionItem]
+
+@app.get("/state")
+async def get_state():
+    if not link_manager or not link_manager.primary_sysid:
+        return {"error": "No vehicle connected", "connection_state": link_manager.connection_state.value if link_manager else "DISCONNECTED"}
+    
+    vehicle = link_manager.vehicles.get(link_manager.primary_sysid)
+    if vehicle:
+        return vehicle.to_dict()
+    return {"error": "Vehicle state not found"}
+
+@app.get("/mission")
+async def get_mission():
+    if not mission_manager:
+        raise HTTPException(status_code=500, detail="Mission manager not initialized")
+    
+    items = await mission_manager.download_mission()
+    return {"items": [item.to_dict() for item in items]}
+
+@app.post("/mission/upload")
+async def upload_mission(request: MissionUploadRequest):
+    if not mission_manager:
+        raise HTTPException(status_code=500, detail="Mission manager not initialized")
+    
+    success = await mission_manager.upload_mission(request.items)
+    if success:
+        return {"status": "success"}
+    else:
+        raise HTTPException(status_code=500, detail="Mission upload failed")
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

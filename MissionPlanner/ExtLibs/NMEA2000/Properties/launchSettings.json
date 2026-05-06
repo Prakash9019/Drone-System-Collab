@@ -1,0 +1,7 @@
+{
+  "profiles": {
+    "NMEA2000": {
+      "commandName": "Project"
+    }
+  }
+}

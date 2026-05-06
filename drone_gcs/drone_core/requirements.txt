@@ -1,0 +1,7 @@
+pymavlink
+fastapi
+uvicorn
+pyzmq
+pydantic
+aiohttp
+pyserial 
