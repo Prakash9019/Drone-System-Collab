@@ -2,7 +2,7 @@ import asyncio
 import time
 import logging
 from pymavlink import mavutil
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 from vehicle_state import VehicleState, ConnectionState
 from message_handlers import handle_message
 from connection_manager import auto_detect_connection
@@ -25,84 +25,149 @@ class LinkManager:
         
         self.connection_state = ConnectionState.DISCONNECTED
         self.last_heartbeat_time = 0.0
+        self.last_message_time = 0.0
         self.last_seq = -1
         self.pending_commands = {}
         self._tasks: List[asyncio.Task] = []
+        self._connect_lock = asyncio.Lock()
+        self._connect_task: Optional[asyncio.Task] = None
+        self._expected_telemetry_types: Set[str] = {"SYS_STATUS", "GLOBAL_POSITION_INT", "ATTITUDE"}
+        self._telemetry_seen_during_handshake: Set[str] = set()
+        self.connect_timeout_s = 30.0
+        self.heartbeat_timeout_s = 3.0
         
     async def connect(self):
-        if self.original_connection_string.lower() == "auto":
-            detected = await auto_detect_connection()
-            if detected:
-                # auto_detect_connection returns "port:baud"
-                parts = detected.split(":")
-                self.connection_string = parts[0]
-                if len(parts) > 1:
-                    self.baudrate = int(parts[1])
-            else:
-                logger.error("Auto-detection failed. Cannot connect.")
-                self.connection_state = ConnectionState.DISCONNECTED
-                # Auto-reconnect logic could go here
-                return
+        if self._connect_lock.locked():
+            logger.warning("Connect request ignored; another connect attempt is in progress.")
+            return False
 
-        logger.info(f"Connecting to {self.connection_string} at baud {self.baudrate}")
-        self.connection_state = ConnectionState.CONNECTING
-        try:
-            self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
-            
-            # Setup forwarding connections
-            for endpoint in self.udp_forwarding_endpoints:
-                logger.info(f"Setting up UDP forwarding to {endpoint}")
-                self.forward_conns.append(mavutil.mavlink_connection(endpoint, input=False))
-                
-            self.running = True
-            
-            # Wait for 2 heartbeats
-            heartbeats_received = 0
-            timeout_end = time.time() + 30.0
-            
-            while heartbeats_received < 2 and time.time() < timeout_end:
-                # Send GCS heartbeat
+        async with self._connect_lock:
+            if self.running and self.connection_state in (ConnectionState.CONNECTED, ConnectionState.ACTIVE):
+                logger.info("LinkManager is already connected.")
+                return True
+
+            if self.original_connection_string.lower() == "auto":
+                detected = await auto_detect_connection()
+                if detected:
+                    parts = detected.split(":")
+                    self.connection_string = parts[0]
+                    if len(parts) > 1:
+                        self.baudrate = int(parts[1])
+                else:
+                    logger.error("Auto-detection failed. Cannot connect.")
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    return False
+
+            logger.info(f"Connecting to {self.connection_string} at baud {self.baudrate}")
+            self._set_connection_state(ConnectionState.CONNECTING)
+
+            try:
+                self.purge_socket()
+                self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
+                self.running = True
+
+                if not self.forward_conns:
+                    for endpoint in self.udp_forwarding_endpoints:
+                        logger.info(f"Setting up UDP forwarding to {endpoint}")
+                        self.forward_conns.append(mavutil.mavlink_connection(endpoint, input=False))
+
+                self._set_connection_state(ConnectionState.WAITING_FOR_HEARTBEAT)
+                session_ok = await self._bootstrap_session()
+                if not session_ok:
+                    logger.error("Failed to validate MAVLink session during connect.")
+                    await self._reset_transport()
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    return False
+
+                self._set_connection_state(ConnectionState.CONNECTED)
+                self._ensure_background_tasks()
+                logger.info("MAVLink session validated and telemetry active.")
+                return True
+            except Exception as e:
+                logger.error(f"Connection failed: {e}")
+                await self._reset_transport()
+                self._set_connection_state(ConnectionState.DISCONNECTED)
+                return False
+
+    def _set_connection_state(self, state: ConnectionState):
+        self.connection_state = state
+        if self.primary_sysid in self.vehicles:
+            self.vehicles[self.primary_sysid].connection_state = state
+
+    def _ensure_vehicle(self, sysid: int, compid: int):
+        if sysid not in self.vehicles:
+            self.vehicles[sysid] = VehicleState(
+                sysid=sysid,
+                compid=compid,
+                connection_state=self.connection_state
+            )
+
+    def _ensure_background_tasks(self):
+        self._tasks = [task for task in self._tasks if not task.done()]
+        if not any(task.get_name() == "read_loop" for task in self._tasks):
+            self._tasks.append(asyncio.create_task(self.read_loop(), name="read_loop"))
+        if not any(task.get_name() == "keep_alive_loop" for task in self._tasks):
+            self._tasks.append(asyncio.create_task(self.keep_alive_loop(), name="keep_alive_loop"))
+
+    async def _bootstrap_session(self) -> bool:
+        self._telemetry_seen_during_handshake.clear()
+        heartbeat_seen = False
+        stream_requested = False
+        deadline = time.time() + self.connect_timeout_s
+        last_gcs_heartbeat = 0.0
+
+        while self.running and self.conn and time.time() < deadline:
+            now = time.time()
+            if now - last_gcs_heartbeat >= 1.0:
                 self.conn.mav.heartbeat_send(
                     mavutil.mavlink.MAV_TYPE_GCS,
                     mavutil.mavlink.MAV_AUTOPILOT_INVALID,
                     0, 0, 0
                 )
-                
-                msg = self.conn.recv_match(type='HEARTBEAT', blocking=False)
-                if msg and msg.type != mavutil.mavlink.MAV_TYPE_GCS:
-                    self.primary_sysid = msg.get_srcSystem()
-                    self.primary_compid = msg.get_srcComponent()
-                    
-                    if self.primary_sysid not in self.vehicles:
-                        self.vehicles[self.primary_sysid] = VehicleState(
-                            sysid=self.primary_sysid, 
-                            compid=self.primary_compid,
-                            connection_state=ConnectionState.CONNECTING
-                        )
-                    
-                    heartbeats_received += 1
-                    logger.info(f"Received heartbeat {heartbeats_received}/2 from sysid {self.primary_sysid}")
-                    
-                await asyncio.sleep(0.5)
+                last_gcs_heartbeat = now
 
-            if heartbeats_received >= 2:
-                self.connection_state = ConnectionState.ACTIVE
+            msg = self.conn.recv_match(blocking=False)
+            if not msg:
+                await asyncio.sleep(0.01)
+                continue
+
+            if msg.get_type() == "BAD_DATA":
+                continue
+
+            msg_type = msg.get_type()
+            sysid = msg.get_srcSystem()
+            compid = msg.get_srcComponent()
+            self.last_message_time = now
+
+            if msg_type == "HEARTBEAT" and getattr(msg, "type", None) != mavutil.mavlink.MAV_TYPE_GCS:
+                heartbeat_seen = True
+                self.last_heartbeat_time = now
+                if self.primary_sysid is None:
+                    self.primary_sysid = sysid
+                    self.primary_compid = compid
+                self._ensure_vehicle(self.primary_sysid, self.primary_compid)
+                handle_message(msg, self.vehicles[self.primary_sysid])
+                if not stream_requested:
+                    self.request_data_streams()
+                    stream_requested = True
+                continue
+
+            if heartbeat_seen and sysid == self.primary_sysid:
+                if msg_type in self._expected_telemetry_types:
+                    self._telemetry_seen_during_handshake.add(msg_type)
                 if self.primary_sysid in self.vehicles:
-                    self.vehicles[self.primary_sysid].connection_state = ConnectionState.ACTIVE
-                self.last_heartbeat_time = time.time()
-                logger.info("Connection established. Requesting data streams.")
-                self.request_data_streams()
-                
-                # Start background tasks
-                self._tasks.append(asyncio.create_task(self.read_loop()))
-                self._tasks.append(asyncio.create_task(self.keep_alive_loop()))
-            else:
-                logger.error("Failed to receive heartbeats.")
-                self.connection_state = ConnectionState.DISCONNECTED
-                
-        except Exception as e:
-            logger.error(f"Connection failed: {e}")
-            self.connection_state = ConnectionState.DISCONNECTED
+                    handle_message(msg, self.vehicles[self.primary_sysid])
+
+            if heartbeat_seen and len(self._telemetry_seen_during_handshake) >= 2:
+                return True
+
+            await asyncio.sleep(0.001)
+
+        return False
+
+    async def _reset_transport(self):
+        self.running = False
+        self.purge_socket()
 
     def request_data_streams(self):
         if not self.conn or not self.primary_sysid:
@@ -152,7 +217,7 @@ class LinkManager:
                             self.pending_commands[cmd] = msg.result
                         
                     sysid = msg.get_srcSystem()
-                    if sysid != mavutil.mavlink.MAV_TYPE_GCS and sysid in self.vehicles:
+                    if sysid == self.primary_sysid and sysid in self.vehicles:
                         # Update packet loss stats
                         state = self.vehicles[sysid]
                         seq = msg.get_seq()
@@ -173,9 +238,8 @@ class LinkManager:
                         
                         if msg.get_type() == 'HEARTBEAT':
                             self.last_heartbeat_time = time.time()
-                            if self.connection_state != ConnectionState.ACTIVE:
-                                self.connection_state = ConnectionState.ACTIVE
-                                self.vehicles[sysid].connection_state = ConnectionState.ACTIVE
+                            if self.connection_state in (ConnectionState.HEARTBEAT_LOST, ConnectionState.RECONNECTING):
+                                self._set_connection_state(ConnectionState.CONNECTED)
                                 logger.info("Link restored. Re-requesting streams.")
                                 self.request_data_streams()
                 
@@ -197,39 +261,51 @@ class LinkManager:
                 )
                 
                 # Check link loss
-                if time.time() - self.last_heartbeat_time > 3.0:
-                    if self.connection_state == ConnectionState.ACTIVE:
-                        logger.warning("Link lost! No heartbeat for 3 seconds. Initiating violent purge.")
-                        self.connection_state = ConnectionState.LOST
-                        if self.primary_sysid in self.vehicles:
-                            self.vehicles[self.primary_sysid].connection_state = ConnectionState.LOST
-                            
-                    # Attempt to reconnect if disconnected and auto
-                    if self.original_connection_string.lower() == "auto":
-                        detected = await auto_detect_connection()
-                        if detected:
-                            parts = detected.split(":")
-                            new_conn_str = parts[0]
-                            new_baud = int(parts[1]) if len(parts) > 1 else self.baudrate
-                            
-                            # Violent purge of existing socket to prevent locking
-                            self.purge_socket()
-                            await asyncio.sleep(1.0) # Let OS clear the socket
-                            
-                            logger.info(f"Auto-reconnecting to {new_conn_str}...")
-                            self.connection_string = new_conn_str
-                            self.baudrate = new_baud
-                            try:
-                                self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
-                                # Next heartbeat will trigger stream requests
-                            except Exception as e:
-                                logger.error(f"Reconnect failed: {e}")
+                if self.last_heartbeat_time and (time.time() - self.last_heartbeat_time > self.heartbeat_timeout_s):
+                    if self.connection_state != ConnectionState.HEARTBEAT_LOST:
+                        logger.warning("Heartbeat lost. Transitioning to HEARTBEAT_LOST.")
+                        self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
+                    await self._attempt_reconnect()
                             
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             logger.info("keep_alive_loop cancelled.")
         except Exception as e:
             logger.error(f"keep_alive_loop error: {e}")
+
+    async def _attempt_reconnect(self):
+        if self._connect_lock.locked():
+            return
+
+        self._set_connection_state(ConnectionState.RECONNECTING)
+        logger.info("Attempting MAVLink reconnect...")
+
+        if self.original_connection_string.lower() == "auto":
+            detected = await auto_detect_connection()
+            if not detected:
+                logger.warning("Auto reconnect failed: no device detected.")
+                return
+            parts = detected.split(":")
+            self.connection_string = parts[0]
+            self.baudrate = int(parts[1]) if len(parts) > 1 else self.baudrate
+
+        try:
+            self.purge_socket()
+            await asyncio.sleep(0.5)
+            self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
+            self.running = True
+            self._set_connection_state(ConnectionState.WAITING_FOR_HEARTBEAT)
+            session_ok = await self._bootstrap_session()
+            if not session_ok:
+                self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
+                return
+
+            self.request_data_streams()
+            self._set_connection_state(ConnectionState.CONNECTED)
+            logger.info("Reconnect successful. Streams renegotiated.")
+        except Exception as e:
+            logger.error(f"Reconnect failed: {e}")
+            self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
 
     async def send_command(self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3):
         if not self.conn:
@@ -346,7 +422,7 @@ class LinkManager:
     async def close(self):
         logger.info("LinkManager initiating shutdown...")
         self.running = False
-        self.connection_state = ConnectionState.DISCONNECTED
+        self._set_connection_state(ConnectionState.DISCONNECTED)
         
         # Cancel all running tasks
         for task in self._tasks:
@@ -358,6 +434,9 @@ class LinkManager:
             self._tasks.clear()
             
         self.purge_socket()
+        self.last_heartbeat_time = 0.0
+        self.last_message_time = 0.0
+        self._telemetry_seen_during_handshake.clear()
             
         for fwd_conn in self.forward_conns:
             try:

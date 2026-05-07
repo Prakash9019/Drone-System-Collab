@@ -8,6 +8,8 @@
   --accent-blue: #3b82f6;
   --accent-green: #10b981;
   --accent-red: #ef4444;
+  --accent-orange: #f97316;
+  --accent-yellow: #f59e0b;
   --border-color: #334155;
 }
 
@@ -614,3 +616,277 @@ body {
   background: var(--bg-dark);
   color: white;
 }
+
+/* ================================================================
+   CONNECTION RIBBON
+================================================================ */
+.connection-ribbon {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 16px;
+  background: #0d1525;
+  border-bottom: 1px solid var(--border-color);
+  height: 44px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.conn-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-weight: 700;
+  font-size: 11px;
+  color: #000;
+  white-space: nowrap;
+  letter-spacing: 0.5px;
+}
+
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.5);
+  flex-shrink: 0;
+}
+
+.conn-dot.pulse {
+  background: #000;
+  box-shadow: 0 0 0 0 rgba(0,0,0,0.4);
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0%   { box-shadow: 0 0 0 0 rgba(0,0,0,0.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(0,0,0,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+}
+
+.conn-stats {
+  display: flex;
+  gap: 16px;
+  color: var(--text-secondary);
+  flex: 1;
+  overflow: hidden;
+}
+
+.conn-stats span {
+  white-space: nowrap;
+}
+
+.conn-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.conn-msg {
+  color: var(--accent-yellow);
+  font-size: 11px;
+}
+
+.btn-conn {
+  padding: 5px 16px;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.btn-conn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-conn.connect    { background: var(--accent-green); color: #000; }
+.btn-conn.disconnect { background: var(--accent-red);   color: #fff; }
+
+/* ================================================================
+   TELEMETRY TAB CONTENT AREA
+================================================================ */
+.telemetry-tab-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* ================================================================
+   QUICK TAB
+================================================================ */
+.quick-tab-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: #2a2a2a;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ================================================================
+   ACTIONS TAB
+================================================================ */
+.actions-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 10px;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.actions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.action-btn {
+  padding: 14px 8px;
+  border: 1px solid var(--action-color, #334155);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  color: var(--action-color, #f8fafc);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--action-color) 15%, transparent);
+  transform: translateY(-1px);
+}
+
+.action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.action-status {
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.action-status.success { background: rgba(16,185,129,0.15); color: #10b981; }
+.action-status.error   { background: rgba(239,68,68,0.15);  color: #ef4444; }
+
+/* ================================================================
+   MESSAGES TAB
+================================================================ */
+.messages-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.messages-console {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  background: #080d14;
+}
+
+.message-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  line-height: 1.5;
+}
+
+.msg-ts       { color: #4b5563; white-space: nowrap; }
+.msg-severity { white-space: nowrap; font-weight: 700; min-width: 90px; }
+.msg-text     { color: #e2e8f0; flex: 1; word-break: break-word; }
+
+/* ================================================================
+   STATUS TAB
+================================================================ */
+.status-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.status-search {
+  background: #0d1525;
+  border: none;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 8px 12px;
+  font-size: 12px;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.status-rows {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.status-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #111827;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-blue);
+  cursor: pointer;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-group-count {
+  margin-left: auto;
+  background: rgba(59,130,246,0.2);
+  color: var(--accent-blue);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-family: monospace;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.status-row:hover {
+  background: rgba(255,255,255,0.04);
+}
+
+.status-key   { color: var(--text-secondary); }
+.status-value { color: var(--text-primary); font-weight: 500; }
+

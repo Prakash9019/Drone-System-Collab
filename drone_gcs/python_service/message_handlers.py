@@ -84,8 +84,11 @@ def handle_message(msg: any, state: VehicleState):
                 state.rc_channels.channels[i] = getattr(msg, attr_name)
                 
     elif msg_type == 'STATUSTEXT':
-        state.status_text.severity = msg.severity
-        state.status_text.text = msg.text
+        from vehicle_state import StatusText
+        new_msg = StatusText(severity=msg.severity, text=msg.text)
+        state.status_messages.append(new_msg)
+        if len(state.status_messages) > 50:
+            state.status_messages.pop(0)
         
     elif msg_type == 'TIMESYNC':
         # Simple latency estimation: Current time - ts1

@@ -1,44 +1,52 @@
-import React from 'react';
-import { TelemetryRegistry } from '../utils/TelemetryRegistry';
+import React, { useState } from 'react';
+import QuickTab from './tabs/QuickTab';
+import ActionsTab from './tabs/ActionsTab';
+import MessagesTab from './tabs/MessagesTab';
+import StatusTab from './tabs/StatusTab';
+import AdvancedHUD from './AdvancedHUD';
+
+const TABS = ['Quick', 'Actions', 'Messages', 'Gauges', 'Status'];
 
 const TelemetryGrid = ({ vehicleState }) => {
-  if (!vehicleState) return null;
+  const [activeTab, setActiveTab] = useState('Quick');
 
-  // We are replicating the Mission Planner Quick tab layout here
-  const displayKeys = [
-    'altitude', 'groundspeed', 
-    'distToWp', 'yaw', 
-    'verticalSpeed', 'distToMav'
-  ];
+  const renderTab = () => {
+    switch (activeTab) {
+      case 'Quick':
+        return <QuickTab vehicleState={vehicleState} />;
+      case 'Actions':
+        return <ActionsTab vehicleState={vehicleState} />;
+      case 'Messages':
+        return <MessagesTab vehicleState={vehicleState} />;
+      case 'Gauges':
+        // Reuse the AdvancedHUD in tab form as the Gauges instrument panel
+        return (
+          <div style={{ height: '100%', padding: '8px', boxSizing: 'border-box' }}>
+            <AdvancedHUD vehicleState={vehicleState} />
+          </div>
+        );
+      case 'Status':
+        return <StatusTab vehicleState={vehicleState} />;
+      default:
+        return null;
+    }
+  };
 
   return (
     <div className="telemetry-grid-container">
-      {/* Tabs placeholder */}
       <div className="telemetry-tabs">
-        <span className="tab active">Quick</span>
-        <span className="tab">Actions</span>
-        <span className="tab">Messages</span>
-        <span className="tab">Gauges</span>
-        <span className="tab">Status</span>
+        {TABS.map(tab => (
+          <span
+            key={tab}
+            className={`tab ${activeTab === tab ? 'active' : ''}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab}
+          </span>
+        ))}
       </div>
-      
-      {/* Grid Content */}
-      <div className="telemetry-grid">
-        {displayKeys.map(key => {
-          const config = TelemetryRegistry[key];
-          if (!config) return null;
-          return (
-            <div key={key} className="telemetry-cell">
-              <div className="telemetry-label">{config.label}</div>
-              <div 
-                className="telemetry-value" 
-                style={{ color: config.color }}
-              >
-                {config.getValue(vehicleState)}
-              </div>
-            </div>
-          );
-        })}
+      <div className="telemetry-tab-content">
+        {renderTab()}
       </div>
     </div>
   );

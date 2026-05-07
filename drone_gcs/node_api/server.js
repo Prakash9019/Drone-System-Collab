@@ -33,6 +33,34 @@ function broadcast(data) {
   });
 }
 
+// Connection lifecycle proxies
+app.post('/api/connection/start', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/connection/start`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start connection', details: err.message });
+  }
+});
+
+app.post('/api/connection/stop', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/connection/stop`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop connection', details: err.message });
+  }
+});
+
+app.get('/api/connection/status', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/connection/status`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch connection status', details: err.message });
+  }
+});
+
 // ZeroMQ Subscriber logic
 async function runZmqSubscriber() {
   const sock = new zmq.Subscriber();

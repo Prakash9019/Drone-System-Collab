@@ -1,14 +1,15 @@
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 class ConnectionState(Enum):
     DISCONNECTED = "DISCONNECTED"
     CONNECTING = "CONNECTING"
-    WAITING_HEARTBEAT = "WAITING_HEARTBEAT"
+    WAITING_FOR_HEARTBEAT = "WAITING_FOR_HEARTBEAT"
     CONNECTED = "CONNECTED"
     ACTIVE = "ACTIVE"
-    LOST = "LOST"
+    HEARTBEAT_LOST = "HEARTBEAT_LOST"
     RECONNECTING = "RECONNECTING"
 
 @dataclass
@@ -65,6 +66,7 @@ class RCChannels:
 class StatusText:
     severity: int = 0
     text: str = ""
+    timestamp: float = field(default_factory=time.time)
 
 @dataclass
 class LinkStatus:
@@ -95,7 +97,7 @@ class VehicleState:
     ekf_status: EKFStatus = field(default_factory=EKFStatus)
     vibration: Vibration = field(default_factory=Vibration)
     rc_channels: RCChannels = field(default_factory=RCChannels)
-    status_text: StatusText = field(default_factory=StatusText)
+    status_messages: List[StatusText] = field(default_factory=list)
     link_status: LinkStatus = field(default_factory=LinkStatus)
     parameters: Dict[str, Any] = field(default_factory=dict)
 
@@ -155,10 +157,10 @@ class VehicleState:
                 "channels": self.rc_channels.channels,
                 "rssi": self.rc_channels.rssi,
             },
-            "status_text": {
-                "severity": self.status_text.severity,
-                "text": self.status_text.text,
-            },
+            "status_messages": [
+                {"severity": msg.severity, "text": msg.text, "timestamp": msg.timestamp}
+                for msg in self.status_messages
+            ],
             "link_status": {
                 "packet_loss_percent": self.link_status.packet_loss_percent,
                 "latency_ms": self.link_status.latency_ms,

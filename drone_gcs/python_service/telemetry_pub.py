@@ -22,6 +22,21 @@ class TelemetryPublisher:
     async def publish_loop(self, link_manager):
         """Continuously publish vehicle state at 10Hz."""
         while self.running:
+            if link_manager:
+                status_payload = {
+                    "type": "CONNECTION_STATUS",
+                    "data": {
+                        "connection_state": link_manager.connection_state.value,
+                        "primary_sysid": link_manager.primary_sysid,
+                        "last_heartbeat": link_manager.last_heartbeat_time,
+                        "running": link_manager.running
+                    }
+                }
+                try:
+                    await self.socket.send_string(json.dumps(status_payload))
+                except Exception as e:
+                    logger.error(f"ZMQ Publish status error: {e}")
+
             if link_manager and link_manager.primary_sysid:
                 vehicle = link_manager.vehicles.get(link_manager.primary_sysid)
                 if vehicle:

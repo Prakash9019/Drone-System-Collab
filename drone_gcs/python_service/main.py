@@ -45,7 +45,6 @@ async def lifespan(app: FastAPI):
     telemetry_publisher.start()
     
     tasks = [
-        asyncio.create_task(link_manager.connect()),
         asyncio.create_task(telemetry_publisher.publish_loop(link_manager))
     ]
     
@@ -108,6 +107,39 @@ class FlyToRequest(BaseModel):
     alt: float
 
 # ---- REST Endpoints ----
+
+@app.post("/connection/start")
+async def start_connection():
+    if not link_manager:
+        raise HTTPException(status_code=500, detail="Link manager not initialized")
+
+    if link_manager._connect_lock.locked():
+        return {"status": "connect_in_progress", "connection_state": link_manager.connection_state.value}
+
+    success = await link_manager.connect()
+    return {
+        "status": "connected" if success else "failed",
+        "connection_state": link_manager.connection_state.value
+    }
+
+@app.post("/connection/stop")
+async def stop_connection():
+    if not link_manager:
+        raise HTTPException(status_code=500, detail="Link manager not initialized")
+        
+    await link_manager.close()
+    return {"status": "stopped"}
+
+@app.get("/connection/status")
+async def connection_status():
+    if not link_manager:
+        raise HTTPException(status_code=500, detail="Link manager not initialized")
+    return {
+        "connection_state": link_manager.connection_state.value,
+        "primary_sysid": link_manager.primary_sysid,
+        "last_heartbeat": link_manager.last_heartbeat_time,
+        "running": link_manager.running
+    }
 
 
 class CommandRequest(BaseModel):
