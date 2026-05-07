@@ -44,16 +44,25 @@ async def lifespan(app: FastAPI):
     telemetry_publisher = TelemetryPublisher(port=5556)
     telemetry_publisher.start()
     
-    asyncio.create_task(link_manager.connect())
-    asyncio.create_task(telemetry_publisher.publish_loop(link_manager))
+    tasks = [
+        asyncio.create_task(link_manager.connect()),
+        asyncio.create_task(telemetry_publisher.publish_loop(link_manager))
+    ]
     
     yield
     
     logger.info("Shutting down MAVLink Service...")
+    
+    # Cancel all background tasks managed by lifespan
+    for t in tasks:
+        t.cancel()
+    
     if telemetry_publisher:
         telemetry_publisher.stop()
     if link_manager:
-        link_manager.close()
+        await link_manager.close()
+        
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(lifespan=lifespan, title="Drone GCS Python Service")
 
@@ -89,6 +98,18 @@ async def upload_mission(request: MissionUploadRequest):
     else:
         raise HTTPException(status_code=500, detail="Mission upload failed")
 
+class ParameterSetRequest(BaseModel):
+    param_id: str
+    param_value: float
+
+class FlyToRequest(BaseModel):
+    lat: float
+    lng: float
+    alt: float
+
+# ---- REST Endpoints ----
+
+
 class CommandRequest(BaseModel):
     command: int
     p1: float = 0
@@ -104,7 +125,7 @@ async def send_command(req: CommandRequest):
     if not link_manager or not link_manager.primary_sysid:
         raise HTTPException(status_code=500, detail="No vehicle connected")
         
-    success = link_manager.send_command(
+    success = await link_manager.send_command(
         link_manager.primary_sysid, link_manager.primary_compid,
         req.command, req.p1, req.p2, req.p3, req.p4, req.p5, req.p6, req.p7
     )
@@ -123,7 +144,17 @@ async def set_mode(req: ModeRequest):
     success = link_manager.set_mode(link_manager.primary_sysid, req.mode)
     if success:
         return {"status": "success"}
-    raise HTTPException(status_code=500, detail="Set mode failed")
+    raise HTTPException(status_code=500, detail="Failed to set mode")
+
+@app.post("/flyto")
+async def fly_to(req: FlyToRequest):
+    if not link_manager or not link_manager.primary_sysid:
+        raise HTTPException(status_code=500, detail="No vehicle connected")
+        
+    success = await link_manager.fly_to_here(link_manager.primary_sysid, link_manager.primary_compid, req.lat, req.lng, req.alt)
+    if success:
+        return {"status": "success"}
+    raise HTTPException(status_code=500, detail="Failed to fly to location")
 
 @app.post("/parameters/refresh")
 async def refresh_parameters():

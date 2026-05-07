@@ -144,3 +144,12 @@ app.post('/api/parameters/set', async (req, res) => {
     res.status(500).json({ error: 'Failed to set parameter', details: err.message });
   }
 });
+
+app.post('/api/flyto', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/flyto`, req.body);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to execute flyto', details: err.message });
+  }
+});

@@ -327,35 +327,102 @@ body {
   color: var(--accent-red);
   background-color: rgba(239, 68, 68, 0.1);
 }
-/* HUD Artificial Horizon */
-.hud-container {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  width: 150px;
-  height: 150px;
-  border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.8);
-  overflow: hidden;
-  background-color: #87CEEB;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-  z-index: 5;
+/* ==============================================================
+   MISSION PLANNER CORE UI 
+   ============================================================== */
+
+/* Layout */
+.mp-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background-color: var(--bg-dark);
 }
 
-.hud-horizon-clip {
+.mp-sidebar {
+  width: 400px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+  background-color: #1a1a1a;
+  z-index: 10;
+}
+
+.mp-hud-section {
+  height: 300px;
+  border-bottom: 2px solid var(--border-color);
+  position: relative;
+  overflow: hidden;
+}
+
+.mp-data-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mp-map-section {
+  flex: 1;
+  position: relative;
+}
+
+/* Advanced HUD */
+.advanced-hud {
   width: 100%;
   height: 100%;
   position: relative;
+  background-color: #000;
+  color: #0f0;
+  font-family: monospace;
   overflow: hidden;
-  border-radius: 50%;
+}
+
+.hud-compass-container {
+  height: 20px;
+  width: 100%;
+  background-color: rgba(0,0,0,0.8);
+  position: absolute;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid white;
+  overflow: hidden;
+}
+
+.hud-compass-ribbon {
+  height: 100%;
+  width: 3600px; /* 10px per degree */
+  background-image: repeating-linear-gradient(90deg, 
+    transparent 0px, transparent 9px, white 9px, white 10px,
+    transparent 10px, transparent 49px, white 49px, white 50px
+  );
+  transition: transform 0.1s linear;
+}
+
+.hud-compass-marker {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  color: red;
+  font-size: 14px;
+}
+
+.hud-horizon-clip {
+  position: absolute;
+  top: 20px; /* Below compass */
+  bottom: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
 }
 
 .hud-horizon-bg {
   position: absolute;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
+  top: -100%;
+  left: -100%;
+  width: 300%;
+  height: 300%;
   transform-origin: center center;
   transition: transform 0.1s linear;
 }
@@ -363,50 +430,173 @@ body {
 .hud-sky {
   width: 100%;
   height: 50%;
-  background-color: #3b82f6;
+  background-color: #5182b8;
 }
 
 .hud-ground {
   width: 100%;
   height: 50%;
-  background-color: #8B4513;
+  background-color: #92b047;
   border-top: 2px solid white;
 }
 
-.hud-crosshair {
+.hud-pitch-ladder {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 40px;
-  height: 2px;
-  background-color: yellow;
-  z-index: 10;
+  width: 100px;
+  height: 200px;
 }
 
-.hud-crosshair::after {
-  content: '';
+.pitch-line {
   position: absolute;
-  top: -5px;
   left: 50%;
   transform: translateX(-50%);
-  width: 2px;
-  height: 12px;
-  background-color: yellow;
+  width: 60px;
+  border-top: 2px solid white;
+  text-align: right;
 }
 
-.hud-readouts {
+.pitch-line span {
   position: absolute;
-  bottom: -25px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 10px;
-  font-size: 0.75rem;
+  right: -25px;
+  top: -10px;
   color: white;
-  background: rgba(0,0,0,0.5);
-  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.pl-10 { top: 70px; }
+.pl-0 { top: 100px; width: 80px; border-color: yellow; }
+.pl--10 { top: 130px; border-top-style: dashed; }
+
+.hud-overlay {
+  position: absolute;
+  top: 20px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.hud-center-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80px;
+  height: 20px;
+  border-top: 3px solid red;
+  border-left: 3px solid red;
+  border-right: 3px solid red;
+  border-bottom: none;
+}
+
+.hud-tape-left, .hud-tape-right {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(0,0,0,0.4);
+  padding: 5px;
   border-radius: 4px;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.hud-tape-left { left: 5px; }
+.hud-tape-right { right: 5px; text-align: right; }
+
+.tape-label { font-size: 10px; color: #ddd; }
+.tape-val { font-size: 16px; font-weight: bold; margin-bottom: 10px; }
+
+.hud-status-text {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  text-shadow: 2px 2px 2px #000;
+}
+
+.armed-text {
+  font-size: 24px;
+  font-weight: bold;
+}
+.armed-text.disarmed { color: red; }
+.armed-text.armed { color: #0f0; }
+
+.mode-text {
+  font-size: 18px;
+  color: white;
+}
+
+.hud-bottom-banner {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: rgba(0,0,0,0.6);
+  color: #0f0;
+  font-size: 11px;
+  padding: 2px 5px;
+}
+
+/* Telemetry Grid */
+.telemetry-grid-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.telemetry-tabs {
+  display: flex;
+  background-color: #222;
+  border-bottom: 1px solid #444;
+}
+
+.telemetry-tabs .tab {
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #aaa;
+  border-right: 1px solid #333;
+}
+
+.telemetry-tabs .tab.active {
+  background-color: #1a1a1a;
+  color: white;
+  border-bottom: 2px solid var(--accent-blue);
+}
+
+.telemetry-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: min-content;
+  gap: 1px;
+  background-color: #333;
+  overflow-y: auto;
+}
+
+.telemetry-cell {
+  background-color: #1a1a1a;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.telemetry-label {
+  font-size: 12px;
+  color: #ccc;
+  margin-bottom: 5px;
+}
+
+.telemetry-value {
+  font-size: 32px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
 }
 
 .mode-select {

@@ -5,8 +5,10 @@ from typing import Dict, Any
 class ConnectionState(Enum):
     DISCONNECTED = "DISCONNECTED"
     CONNECTING = "CONNECTING"
+    WAITING_HEARTBEAT = "WAITING_HEARTBEAT"
+    CONNECTED = "CONNECTED"
     ACTIVE = "ACTIVE"
-    LINK_LOSS = "LINK_LOSS"
+    LOST = "LOST"
     RECONNECTING = "RECONNECTING"
 
 @dataclass
