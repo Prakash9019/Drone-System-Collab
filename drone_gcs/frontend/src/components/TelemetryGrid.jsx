@@ -3,9 +3,11 @@ import QuickTab from './tabs/QuickTab';
 import ActionsTab from './tabs/ActionsTab';
 import MessagesTab from './tabs/MessagesTab';
 import StatusTab from './tabs/StatusTab';
+import PreFlightTab from './tabs/PreFlightTab';
+import ServoTab from './tabs/ServoTab';
 import AdvancedHUD from './AdvancedHUD';
 
-const TABS = ['Quick', 'Actions', 'Messages', 'Gauges', 'Status'];
+const TABS = ['Quick', 'Actions', 'Messages', 'PreFlight', 'Gauges', 'Status', 'Servo'];
 
 const TelemetryGrid = ({ vehicleState }) => {
   const [activeTab, setActiveTab] = useState('Quick');
@@ -18,6 +20,8 @@ const TelemetryGrid = ({ vehicleState }) => {
         return <ActionsTab vehicleState={vehicleState} />;
       case 'Messages':
         return <MessagesTab vehicleState={vehicleState} />;
+      case 'PreFlight':
+        return <PreFlightTab vehicleState={vehicleState} />;
       case 'Gauges':
         // Reuse the AdvancedHUD in tab form as the Gauges instrument panel
         return (
@@ -27,6 +31,8 @@ const TelemetryGrid = ({ vehicleState }) => {
         );
       case 'Status':
         return <StatusTab vehicleState={vehicleState} />;
+      case 'Servo':
+        return <ServoTab vehicleState={vehicleState} />;
       default:
         return null;
     }

@@ -2,6 +2,15 @@ from pymavlink import mavutil
 from vehicle_state import VehicleState
 import time
 
+_GPS_INVALID_UINT16 = 65535
+
+
+def _ratio_from_eps_raw(raw_eps: int) -> float:
+    """GPS_RAW_INT eph/epv are HDOP/VDOP scaled by 100; unknown = UINT16_MAX."""
+    if raw_eps is None or raw_eps <= 0 or raw_eps >= _GPS_INVALID_UINT16:
+        return 0.0
+    return raw_eps / 100.0
+
 def decode_mode(custom_mode: int, system_type: int) -> str:
     # A mapping function to get mode name string based on system type (e.g. Copter, Plane)
     # This is a simplified version, it should ideally use mavutil.mode_mapping()
@@ -36,10 +45,15 @@ def handle_message(msg: any, state: VehicleState):
         state.battery.voltage = msg.voltage_battery / 1000.0  # mV to V
         state.battery.current = msg.current_battery / 100.0   # cA to A
         state.battery.remaining = msg.battery_remaining       # %
+        state.status.sensors_present = int(msg.onboard_control_sensors_present)
+        state.status.sensors_enabled = int(msg.onboard_control_sensors_enabled)
+        state.status.sensors_health = int(msg.onboard_control_sensors_health)
         
     elif msg_type == 'GPS_RAW_INT':
         state.status.gps_fix = msg.fix_type
         state.status.satellites = msg.satellites_visible
+        state.status.gps_hdop = _ratio_from_eps_raw(int(msg.eph))
+        state.status.gps_vdop = _ratio_from_eps_raw(int(msg.epv))
         
     elif msg_type == 'ATTITUDE':
         state.attitude.roll = msg.roll
@@ -51,7 +65,20 @@ def handle_message(msg: any, state: VehicleState):
         state.position.lng = msg.lon / 1e7
         state.position.alt_amsl = msg.alt / 1000.0
         state.position.alt_rel = msg.relative_alt / 1000.0
-        # Wait, vx, vy, vz mapping missing in plan but standard
+        hdg = getattr(msg, "heading", None)
+        if hdg is not None and hdg != 65535 and hdg != 65536:
+            try:
+                state.velocity.heading = float(hdg) / 100.0
+            except (TypeError, ValueError):
+                pass
+    elif msg_type == 'HOME_POSITION':
+        state.home.lat = msg.latitude / 1e7
+        state.home.lng = msg.longitude / 1e7
+        state.home.alt_m = msg.altitude / 1000.0
+        state.home.valid = True
+        
+    elif msg_type == 'MISSION_CURRENT':
+        state.mission_current_seq = int(msg.seq)
         
     elif msg_type == 'VFR_HUD':
         state.velocity.airspeed = msg.airspeed
@@ -82,6 +109,17 @@ def handle_message(msg: any, state: VehicleState):
             attr_name = f'chan{i}_raw'
             if hasattr(msg, attr_name):
                 state.rc_channels.channels[i] = getattr(msg, attr_name)
+
+    elif msg_type == 'SERVO_OUTPUT_RAW':
+        for i in range(1, 17):
+            attr_name = f'servo{i}_raw'
+            if hasattr(msg, attr_name):
+                state.servo_output.channels[i] = getattr(msg, attr_name)
+
+    elif msg_type == 'NAV_CONTROLLER_OUTPUT':
+        state.navigation.wp_dist = float(getattr(msg, 'wp_dist', -1.0))
+        state.navigation.target_bearing = float(getattr(msg, 'target_bearing', 0.0))
+        state.navigation.nav_bearing = float(getattr(msg, 'nav_bearing', 0.0))
                 
     elif msg_type == 'STATUSTEXT':
         from vehicle_state import StatusText

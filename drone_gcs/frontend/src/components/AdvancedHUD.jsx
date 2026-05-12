@@ -1,6 +1,6 @@
 import React from 'react';
 
-const AdvancedHUD = ({ vehicleState }) => {
+const AdvancedHUD = ({ vehicleState, operational }) => {
   if (!vehicleState) return <div className="advanced-hud placeholder">No Telemetry</div>;
 
   const { attitude = {}, velocity = {}, status = {}, position = {}, battery = {} } = vehicleState;
@@ -74,6 +74,11 @@ const AdvancedHUD = ({ vehicleState }) => {
             {status.armed ? 'ARMED' : 'DISARMED'}
           </div>
           <div className="mode-text">{status.mode}</div>
+          {operational?.label && (
+            <div className="mode-text" style={{ fontSize: 11, opacity: 0.9 }}>
+              {operational.label}
+            </div>
+          )}
         </div>
         
         {/* Bottom Banner */}

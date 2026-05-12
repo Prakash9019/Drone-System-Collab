@@ -63,6 +63,16 @@ class RCChannels:
     rssi: int = 0
 
 @dataclass
+class ServoOutput:
+    channels: Dict[int, int] = field(default_factory=dict)
+
+@dataclass
+class Navigation:
+    wp_dist: float = -1.0
+    target_bearing: float = 0.0
+    nav_bearing: float = 0.0
+
+@dataclass
 class StatusText:
     severity: int = 0
     text: str = ""
@@ -74,6 +84,8 @@ class LinkStatus:
     latency_ms: float = 0.0
     total_packets_received: int = 0
     total_packets_lost: int = 0
+    packets_per_second: float = 0.0
+    heartbeat_age_s: float = 0.0
 
 @dataclass
 class Status:
@@ -82,6 +94,20 @@ class Status:
     system_type: int = 0
     gps_fix: int = 0
     satellites: int = 0
+    # From GPS_RAW_INT eph/epv (HDOP/VDOP * 100); 0 = unknown
+    gps_hdop: float = 0.0
+    gps_vdop: float = 0.0
+    sensors_present: int = 0
+    sensors_enabled: int = 0
+    sensors_health: int = 0
+
+
+@dataclass
+class HomePosition:
+    lat: float = 0.0
+    lng: float = 0.0
+    alt_m: float = 0.0
+    valid: bool = False
 
 @dataclass
 class VehicleState:
@@ -97,9 +123,13 @@ class VehicleState:
     ekf_status: EKFStatus = field(default_factory=EKFStatus)
     vibration: Vibration = field(default_factory=Vibration)
     rc_channels: RCChannels = field(default_factory=RCChannels)
+    servo_output: ServoOutput = field(default_factory=ServoOutput)
+    navigation: Navigation = field(default_factory=Navigation)
     status_messages: List[StatusText] = field(default_factory=list)
     link_status: LinkStatus = field(default_factory=LinkStatus)
     parameters: Dict[str, Any] = field(default_factory=dict)
+    home: HomePosition = field(default_factory=HomePosition)
+    mission_current_seq: int = -1
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,6 +166,11 @@ class VehicleState:
                 "system_type": self.status.system_type,
                 "gps_fix": self.status.gps_fix,
                 "satellites": self.status.satellites,
+                "gps_hdop": self.status.gps_hdop,
+                "gps_vdop": self.status.gps_vdop,
+                "sensors_present": self.status.sensors_present,
+                "sensors_enabled": self.status.sensors_enabled,
+                "sensors_health": self.status.sensors_health,
             },
             "ekf_status": {
                 "flags": self.ekf_status.flags,
@@ -157,6 +192,14 @@ class VehicleState:
                 "channels": self.rc_channels.channels,
                 "rssi": self.rc_channels.rssi,
             },
+            "servo_output": {
+                "channels": self.servo_output.channels,
+            },
+            "navigation": {
+                "wp_dist": self.navigation.wp_dist,
+                "target_bearing": self.navigation.target_bearing,
+                "nav_bearing": self.navigation.nav_bearing,
+            },
             "status_messages": [
                 {"severity": msg.severity, "text": msg.text, "timestamp": msg.timestamp}
                 for msg in self.status_messages
@@ -164,6 +207,19 @@ class VehicleState:
             "link_status": {
                 "packet_loss_percent": self.link_status.packet_loss_percent,
                 "latency_ms": self.link_status.latency_ms,
+                "total_packets_received": self.link_status.total_packets_received,
+                "total_packets_lost": self.link_status.total_packets_lost,
+                "packets_per_second": self.link_status.packets_per_second,
+                "heartbeat_age_s": self.link_status.heartbeat_age_s,
             },
-            "parameters": self.parameters
+            "parameters": self.parameters,
+            "home": {
+                "lat": self.home.lat,
+                "lng": self.home.lng,
+                "alt_m": self.home.alt_m,
+                "valid": self.home.valid,
+            },
+            "mission": {
+                "current_seq": self.mission_current_seq,
+            },
         }

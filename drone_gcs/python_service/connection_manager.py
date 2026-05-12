@@ -2,7 +2,7 @@ import serial.tools.list_ports
 import logging
 import asyncio
 from pymavlink import mavutil
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +13,20 @@ def get_available_serial_ports() -> List[str]:
     ports = serial.tools.list_ports.comports()
     # Filter out common non-device ports if necessary, but returning all is safer
     return [port.device for port in ports]
+
+
+def list_serial_ports_detailed() -> List[Dict[str, str]]:
+    """USB/serial ports for GCS connect UI (device path + description)."""
+    out: List[dict] = []
+    for p in serial.tools.list_ports.comports():
+        out.append(
+            {
+                "device": p.device,
+                "description": (p.description or "").strip(),
+                "hwid": (getattr(p, "hwid", None) or "").strip(),
+            }
+        )
+    return out
 
 async def auto_detect_connection() -> Optional[str]:
     """

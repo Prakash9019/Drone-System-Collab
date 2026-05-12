@@ -2,6 +2,19 @@
 // Maps user-friendly telemetry labels to strict vehicleState normalized paths.
 // This ensures the UI is loosely coupled to the exact MAVLink structure.
 
+function haversineM(lat1, lon1, lat2, lon2) {
+  if (!lat1 || !lon1 || !lat2 || !lon2) return null;
+  const R = 6371000;
+  const toR = (d) => (d * Math.PI) / 180;
+  const dLat = toR(lat2 - lat1);
+  const dLon = toR(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toR(lat1)) * Math.cos(toR(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 export const TelemetryRegistry = {
   altitude: {
     label: "Altitude (m)",
@@ -13,10 +26,20 @@ export const TelemetryRegistry = {
     getValue: (state) => state.velocity?.groundspeed?.toFixed(2) || "0.00",
     color: "var(--accent-orange)",
   },
+  missionSeq: {
+    label: "Mission seq",
+    getValue: (state) => {
+      const s = state.mission?.current_seq;
+      return s == null || s < 0 ? "—" : String(s);
+    },
+    color: "var(--accent-red)",
+  },
   distToWp: {
     label: "Dist to WP (m)",
-    // Placeholder until mission active WP tracking is implemented
-    getValue: (state) => "0.00", 
+    getValue: (state) => {
+      const d = state.navigation?.wp_dist;
+      return d == null || d < 0 ? "—" : Number(d).toFixed(1);
+    },
     color: "var(--accent-red)",
   },
   yaw: {
@@ -36,9 +59,26 @@ export const TelemetryRegistry = {
     color: "var(--accent-yellow)",
   },
   distToMav: {
-    label: "DistToMAV (m)",
-    // Placeholder until home location distance is computed
-    getValue: (state) => "0.00",
+    label: "Dist to home (m)",
+    getValue: (state) => {
+      if (!state.home?.valid) return "—";
+      const d = haversineM(
+        state.position?.lat,
+        state.position?.lng,
+        state.home.lat,
+        state.home.lng
+      );
+      return d == null ? "—" : d.toFixed(1);
+    },
+    color: "var(--accent-blue)",
+  },
+  gpsHdop: {
+    label: "GPS HDOP",
+    getValue: (state) => {
+      const h = state.status?.gps_hdop;
+      if (h == null || h <= 0) return "—";
+      return h.toFixed(2);
+    },
     color: "var(--accent-blue)",
   },
   battery: {

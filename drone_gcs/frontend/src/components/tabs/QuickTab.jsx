@@ -12,10 +12,10 @@ const QuickTab = ({ vehicleState }) => {
 
   const displayKeys = [
     'altitude', 'groundspeed',
-    'distToWp', 'yaw',
+    'missionSeq', 'distToWp',
     'verticalSpeed', 'distToMav',
     'battery', 'gpsFix',
-    'satellites',
+    'satellites', 'gpsHdop',
   ];
 
   return (

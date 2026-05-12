@@ -20,6 +20,8 @@ const buildStatusRows = (v) => {
     // --- GPS ---
     { group: 'GPS', key: 'fix_type', value: v.status?.gps_fix ?? 0 },
     { group: 'GPS', key: 'satellites', value: v.status?.satellites ?? 0 },
+    { group: 'GPS', key: 'hdop', value: v.status?.gps_hdop?.toFixed?.(2) ?? '--' },
+    { group: 'GPS', key: 'vdop', value: v.status?.gps_vdop?.toFixed?.(2) ?? '--' },
     { group: 'GPS', key: 'lat', value: v.position?.lat?.toFixed(7) ?? '--' },
     { group: 'GPS', key: 'lng', value: v.position?.lng?.toFixed(7) ?? '--' },
     { group: 'GPS', key: 'alt_amsl_m', value: v.position?.alt_amsl?.toFixed(2) ?? '--' },
@@ -48,6 +50,13 @@ const buildStatusRows = (v) => {
     { group: 'EKF', key: 'pos_horiz_variance', value: v.ekf_status?.pos_horiz_variance?.toFixed(4) ?? '--' },
     { group: 'EKF', key: 'pos_vert_variance', value: v.ekf_status?.pos_vert_variance?.toFixed(4) ?? '--' },
     { group: 'EKF', key: 'compass_variance', value: v.ekf_status?.compass_variance?.toFixed(4) ?? '--' },
+    { group: 'EKF', key: 'terrain_alt_variance', value: v.ekf_status?.terrain_alt_variance?.toFixed(4) ?? '--' },
+
+    // --- Navigation ---
+    { group: 'Navigation', key: 'mission_current_seq', value: v.mission?.current_seq ?? -1 },
+    { group: 'Navigation', key: 'wp_dist_m', value: v.navigation?.wp_dist?.toFixed?.(1) ?? '--' },
+    { group: 'Navigation', key: 'target_bearing_deg', value: v.navigation?.target_bearing?.toFixed?.(1) ?? '--' },
+    { group: 'Navigation', key: 'nav_bearing_deg', value: v.navigation?.nav_bearing?.toFixed?.(1) ?? '--' },
 
     // --- Vibration ---
     { group: 'Vibration', key: 'vib_x', value: v.vibration?.vibration_x?.toFixed(3) ?? '--' },
@@ -61,6 +70,9 @@ const buildStatusRows = (v) => {
     { group: 'RC', key: 'rssi', value: v.rc_channels?.rssi ?? '--' },
     ...Object.entries(v.rc_channels?.channels ?? {}).map(([ch, val]) => ({
       group: 'RC', key: `ch${ch}_raw`, value: val
+    })),
+    ...Object.entries(v.servo_output?.channels ?? {}).map(([ch, val]) => ({
+      group: 'Servo', key: `servo${ch}_raw`, value: val
     })),
   ];
 };

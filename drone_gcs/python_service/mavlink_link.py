@@ -2,12 +2,29 @@ import asyncio
 import time
 import logging
 from pymavlink import mavutil
-from typing import Dict, Optional, List, Set
+from typing import Dict, Optional, List, Set, Any
 from vehicle_state import VehicleState, ConnectionState
 from message_handlers import handle_message
 from connection_manager import auto_detect_connection
+from adsb_store import AdsbTrafficStore
 
 logger = logging.getLogger(__name__)
+
+
+def mav_result_text(result: int) -> str:
+    names = {
+        mavutil.mavlink.MAV_RESULT_ACCEPTED: "ACCEPTED",
+        mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED: "TEMPORARILY_REJECTED",
+        mavutil.mavlink.MAV_RESULT_DENIED: "DENIED",
+        mavutil.mavlink.MAV_RESULT_UNSUPPORTED: "UNSUPPORTED",
+        mavutil.mavlink.MAV_RESULT_FAILED: "FAILED",
+        mavutil.mavlink.MAV_RESULT_IN_PROGRESS: "IN_PROGRESS",
+        mavutil.mavlink.MAV_RESULT_COMMAND_LONG_ONLY: "COMMAND_LONG_ONLY",
+        mavutil.mavlink.MAV_RESULT_COMMAND_INT_ONLY: "COMMAND_INT_ONLY",
+    }
+    r = int(result)
+    return names.get(r, f"MAV_RESULT_{r}")
+
 
 class LinkManager:
     def __init__(self, connection_string: str = "auto", baudrate: int = 115200, udp_forwarding_endpoints: List[str] = None):
@@ -35,7 +52,17 @@ class LinkManager:
         self._telemetry_seen_during_handshake: Set[str] = set()
         self.connect_timeout_s = 30.0
         self.heartbeat_timeout_s = 3.0
-        
+        self.heartbeat_required_for_connect = 2
+        self.serial_settle_s = 0.6
+        self.reconnect_retry_delay_s = 1.0
+        self._last_reconnect_attempt = 0.0
+        self._pps_window_start = time.time()
+        self._pps_window_packets = 0
+        self.message_counts: Dict[str, int] = {}
+        self.message_counts_window_started_at = time.time()
+        self._streams_sent: Set[tuple] = set()
+        self.adsb_store = AdsbTrafficStore()
+
     async def connect(self):
         if self._connect_lock.locked():
             logger.warning("Connect request ignored; another connect attempt is in progress.")
@@ -63,7 +90,7 @@ class LinkManager:
 
             try:
                 self.purge_socket()
-                self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
+                self.conn = await self._open_transport_with_stabilization()
                 self.running = True
 
                 if not self.forward_conns:
@@ -89,6 +116,37 @@ class LinkManager:
                 self._set_connection_state(ConnectionState.DISCONNECTED)
                 return False
 
+    async def _open_transport_with_stabilization(self):
+        """
+        Mission Planner style: explicit close/pause/open/pause helps serial/BLE links
+        settle after process restart, preventing stale dead sessions.
+        """
+        last_error = None
+        for attempt in range(3):
+            try:
+                conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
+                await asyncio.sleep(self.serial_settle_s)
+
+                # Transport-specific nudge for flaky serial/Bluetooth adapters.
+                if hasattr(conn, "port"):
+                    try:
+                        if hasattr(conn.port, "dtr"):
+                            conn.port.dtr = False
+                            await asyncio.sleep(0.05)
+                            conn.port.dtr = True
+                        if hasattr(conn.port, "rts"):
+                            conn.port.rts = False
+                            await asyncio.sleep(0.05)
+                            conn.port.rts = True
+                    except Exception as e:
+                        logger.debug(f"Serial stabilization toggle skipped: {e}")
+                return conn
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Transport open attempt {attempt + 1}/3 failed: {e}")
+                await asyncio.sleep(0.4)
+        raise RuntimeError(f"Unable to open transport after retries: {last_error}")
+
     def _set_connection_state(self, state: ConnectionState):
         self.connection_state = state
         if self.primary_sysid in self.vehicles:
@@ -101,6 +159,8 @@ class LinkManager:
                 compid=compid,
                 connection_state=self.connection_state
             )
+        else:
+            self.vehicles[sysid].compid = compid
 
     def _ensure_background_tasks(self):
         self._tasks = [task for task in self._tasks if not task.done()]
@@ -112,6 +172,7 @@ class LinkManager:
     async def _bootstrap_session(self) -> bool:
         self._telemetry_seen_during_handshake.clear()
         heartbeat_seen = False
+        heartbeats_seen = 0
         stream_requested = False
         deadline = time.time() + self.connect_timeout_s
         last_gcs_heartbeat = 0.0
@@ -141,13 +202,14 @@ class LinkManager:
 
             if msg_type == "HEARTBEAT" and getattr(msg, "type", None) != mavutil.mavlink.MAV_TYPE_GCS:
                 heartbeat_seen = True
-                self.last_heartbeat_time = now
+                heartbeats_seen += 1
                 if self.primary_sysid is None:
                     self.primary_sysid = sysid
                     self.primary_compid = compid
-                self._ensure_vehicle(self.primary_sysid, self.primary_compid)
-                handle_message(msg, self.vehicles[self.primary_sysid])
-                if not stream_requested:
+                self._ensure_vehicle(sysid, compid)
+                handle_message(msg, self.vehicles[sysid])
+                self.last_heartbeat_time = now
+                if not stream_requested and sysid == self.primary_sysid:
                     self.request_data_streams()
                     stream_requested = True
                 continue
@@ -158,7 +220,7 @@ class LinkManager:
                 if self.primary_sysid in self.vehicles:
                     handle_message(msg, self.vehicles[self.primary_sysid])
 
-            if heartbeat_seen and len(self._telemetry_seen_during_handshake) >= 2:
+            if heartbeats_seen >= self.heartbeat_required_for_connect and len(self._telemetry_seen_during_handshake) >= 2:
                 return True
 
             await asyncio.sleep(0.001)
@@ -167,35 +229,75 @@ class LinkManager:
 
     async def _reset_transport(self):
         self.running = False
+        self.vehicles.clear()
+        self.primary_sysid = None
+        self.primary_compid = None
+        self._streams_sent.clear()
+        self.last_seq = -1
+        if getattr(self, "adsb_store", None):
+            self.adsb_store.clear()
         self.purge_socket()
+
+    def request_data_streams_for(self, sysid: int, compid: int):
+        if not self.conn:
+            return
+        streams = [
+            (mavutil.mavlink.MAV_DATA_STREAM_ALL, 5),
+            (mavutil.mavlink.MAV_DATA_STREAM_POSITION, 10),
+            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10),
+            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA2, 10),
+            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 5),
+            (mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2),
+            (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 5),
+        ]
+        for stream_id, rate in streams:
+            self.conn.mav.request_data_stream_send(sysid, compid, stream_id, rate, 1)
 
     def request_data_streams(self):
         if not self.conn or not self.primary_sysid:
             return
-            
-        streams = [
-            (mavutil.mavlink.MAV_DATA_STREAM_ALL, 5), # Ask for everything at 5Hz to avoid 0s
-            (mavutil.mavlink.MAV_DATA_STREAM_POSITION, 10),
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10), # Attitude
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA2, 10),  # VFR_HUD
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2), # SYS_STATUS
-            (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 5)
-        ]
-        
-        for stream_id, rate in streams:
-            self.conn.mav.request_data_stream_send(
-                self.primary_sysid,
-                self.primary_compid,
-                stream_id,
-                rate,
-                1 # start
+        self.request_data_streams_for(self.primary_sysid, self.primary_compid)
+
+    def select_primary(self, sysid: int) -> bool:
+        if sysid not in self.vehicles:
+            return False
+        self.primary_sysid = sysid
+        self.primary_compid = self.vehicles[sysid].compid
+        hb = self.vehicles[sysid].last_heartbeat
+        if hb:
+            self.last_heartbeat_time = hb
+        self._set_connection_state(self.connection_state)
+        self.request_data_streams()
+        return True
+
+    def list_vehicles_payload(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        out: List[Dict[str, Any]] = []
+        for sysid in sorted(self.vehicles.keys()):
+            v = self.vehicles[sysid]
+            hb_age = None
+            if v.last_heartbeat:
+                hb_age = max(0.0, now - v.last_heartbeat)
+            out.append(
+                {
+                    "sysid": sysid,
+                    "compid": v.compid,
+                    "mode": v.status.mode,
+                    "armed": v.status.armed,
+                    "last_heartbeat": v.last_heartbeat,
+                    "heartbeat_age_s": hb_age,
+                    "is_primary": sysid == self.primary_sysid,
+                }
             )
+        return out
 
     async def read_loop(self):
         try:
             while self.running and self.conn:
                 msg = self.conn.recv_match(blocking=False)
                 if msg:
+                    mtype = msg.get_type()
+                    self.message_counts[mtype] = self.message_counts.get(mtype, 0) + 1
                     # Forward packet to other clients if configured
                     for fwd_conn in self.forward_conns:
                         try:
@@ -205,10 +307,22 @@ class LinkManager:
 
                     if msg.get_type() == "BAD_DATA":
                         continue
+
+                    if mtype == "ADSB_VEHICLE":
+                        if getattr(self, "adsb_store", None):
+                            self.adsb_store.ingest(msg)
+                        continue
+
+                    if msg.get_type() == 'PARAM_VALUE' and hasattr(self, 'parameter_manager') and self.parameter_manager:
+                        if msg.get_srcSystem() == self.primary_sysid:
+                            self.parameter_manager.on_param_value(msg)
                     
-                    # Route mission messages
+                    # Route mission messages (primary vehicle only)
                     if hasattr(self, 'mission_manager') and self.mission_manager:
-                        if msg.get_type() in ['MISSION_COUNT', 'MISSION_ITEM_INT', 'MISSION_REQUEST_INT', 'MISSION_ACK']:
+                        if msg.get_srcSystem() == self.primary_sysid and msg.get_type() in [
+                            'MISSION_COUNT', 'MISSION_ITEM_INT', 'MISSION_ITEM',
+                            'MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'
+                        ]:
                             self.mission_manager.handle_mission_message(msg)
                             
                     if msg.get_type() == 'COMMAND_ACK':
@@ -217,26 +331,48 @@ class LinkManager:
                             self.pending_commands[cmd] = msg.result
                         
                     sysid = msg.get_srcSystem()
-                    if sysid == self.primary_sysid and sysid in self.vehicles:
-                        # Update packet loss stats
+                    compid = msg.get_srcComponent()
+
+                    if mtype == "HEARTBEAT" and getattr(msg, "type", None) != mavutil.mavlink.MAV_TYPE_GCS:
+                        self._ensure_vehicle(sysid, compid)
+                        key = (sysid, compid)
+                        if key not in self._streams_sent:
+                            self.request_data_streams_for(sysid, compid)
+                            self._streams_sent.add(key)
+
+                    if sysid in self.vehicles:
                         state = self.vehicles[sysid]
-                        seq = msg.get_seq()
-                        
-                        if self.last_seq != -1:
-                            diff = (seq - self.last_seq) % 256
-                            if diff > 1:
-                                state.link_status.total_packets_lost += (diff - 1)
-                                
-                        state.link_status.total_packets_received += 1
-                        self.last_seq = seq
-                        
-                        if state.link_status.total_packets_received > 0:
-                            total = state.link_status.total_packets_received + state.link_status.total_packets_lost
-                            state.link_status.packet_loss_percent = (state.link_status.total_packets_lost / total) * 100.0
+                        if sysid == self.primary_sysid:
+                            try:
+                                seq = msg.get_seq()
+                            except Exception:
+                                seq = 0
+                            if self.last_seq != -1:
+                                diff = (seq - self.last_seq) % 256
+                                if diff > 1:
+                                    state.link_status.total_packets_lost += (diff - 1)
+                            state.link_status.total_packets_received += 1
+                            self._pps_window_packets += 1
+                            self.last_seq = seq
+                            if state.link_status.total_packets_received > 0:
+                                total = state.link_status.total_packets_received + state.link_status.total_packets_lost
+                                state.link_status.packet_loss_percent = (
+                                    state.link_status.total_packets_lost / total
+                                ) * 100.0
+                            if self.last_heartbeat_time:
+                                state.link_status.heartbeat_age_s = max(
+                                    0.0, time.time() - self.last_heartbeat_time
+                                )
+                            now = time.time()
+                            elapsed = now - self._pps_window_start
+                            if elapsed >= 1.0:
+                                state.link_status.packets_per_second = self._pps_window_packets / elapsed
+                                self._pps_window_start = now
+                                self._pps_window_packets = 0
 
                         handle_message(msg, state)
-                        
-                        if msg.get_type() == 'HEARTBEAT':
+
+                        if mtype == 'HEARTBEAT' and sysid == self.primary_sysid:
                             self.last_heartbeat_time = time.time()
                             if self.connection_state in (ConnectionState.HEARTBEAT_LOST, ConnectionState.RECONNECTING):
                                 self._set_connection_state(ConnectionState.CONNECTED)
@@ -276,6 +412,9 @@ class LinkManager:
     async def _attempt_reconnect(self):
         if self._connect_lock.locked():
             return
+        if (time.time() - self._last_reconnect_attempt) < self.reconnect_retry_delay_s:
+            return
+        self._last_reconnect_attempt = time.time()
 
         self._set_connection_state(ConnectionState.RECONNECTING)
         logger.info("Attempting MAVLink reconnect...")
@@ -292,7 +431,7 @@ class LinkManager:
         try:
             self.purge_socket()
             await asyncio.sleep(0.5)
-            self.conn = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
+            self.conn = await self._open_transport_with_stabilization()
             self.running = True
             self._set_connection_state(ConnectionState.WAITING_FOR_HEARTBEAT)
             session_ok = await self._bootstrap_session()
@@ -300,6 +439,7 @@ class LinkManager:
                 self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
                 return
 
+            self._streams_sent.clear()
             self.request_data_streams()
             self._set_connection_state(ConnectionState.CONNECTED)
             logger.info("Reconnect successful. Streams renegotiated.")
@@ -307,41 +447,68 @@ class LinkManager:
             logger.error(f"Reconnect failed: {e}")
             self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
 
-    async def send_command(self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3):
+    async def send_command(
+        self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3
+    ) -> Dict[str, Any]:
         if not self.conn:
-            return False
-            
+            return {
+                "accepted": False,
+                "mav_result": -1,
+                "mav_result_text": "NO_CONNECTION",
+                "reason": "no_connection",
+                "command": int(command),
+            }
+
         for attempt in range(retries):
             self.pending_commands[command] = None
             try:
                 self.conn.mav.command_long_send(
                     sysid, compid,
                     command,
-                    0, # confirmation
+                    0,  # confirmation
                     p1, p2, p3, p4, p5, p6, p7
                 )
             except Exception as e:
                 logger.error(f"Failed to send command {command}: {e}")
-                
-            # Wait for ACK
-            timeout = time.time() + 2.0
+
+            timeout = time.time() + (5.0 if int(command) == 400 else 3.0)
             while time.time() < timeout:
                 if self.pending_commands.get(command) is not None:
                     result = self.pending_commands[command]
-                    if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                        del self.pending_commands[command]
-                        return True
-                    else:
+                    del self.pending_commands[command]
+                    ok = result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+                    if not ok:
                         logger.warning(f"Command {command} rejected with result {result}")
-                        del self.pending_commands[command]
-                        return False # Rejected, no retry
+                    return {
+                        "accepted": ok,
+                        "mav_result": int(result),
+                        "mav_result_text": mav_result_text(int(result)),
+                        "reason": "mavlink" if not ok else "accepted",
+                        "command": int(command),
+                    }
                 await asyncio.sleep(0.1)
-                
-            logger.warning(f"Command {command} timeout, retrying {attempt+1}/{retries}...")
-            
+
+            logger.warning(f"Command {command} timeout, retrying {attempt + 1}/{retries}...")
+
         if command in self.pending_commands:
             del self.pending_commands[command]
-        return False
+        return {
+            "accepted": False,
+            "mav_result": -1,
+            "mav_result_text": "TIMEOUT",
+            "reason": "timeout",
+            "command": int(command),
+        }
+
+    def list_flight_modes(self) -> List[str]:
+        if not self.conn:
+            return []
+        try:
+            mm = self.conn.mode_mapping()
+            return sorted(mm.keys()) if mm else []
+        except Exception as e:
+            logger.debug(f"mode_mapping failed: {e}")
+            return []
 
     def set_mode(self, sysid: int, mode: str):
         if not self.conn:
@@ -387,6 +554,63 @@ class LinkManager:
             logger.error(f"Failed to send fly_to_here: {e}")
             return False
 
+    async def set_home_location(self, sysid: int, compid: int, lat: float, lng: float, alt: float) -> Dict[str, Any]:
+        """MAV_CMD_DO_SET_HOME: use explicit lat/lng/alt (param1=0)."""
+        if not self.conn:
+            return {
+                "accepted": False,
+                "mav_result": -1,
+                "mav_result_text": "NO_CONNECTION",
+                "reason": "no_connection",
+                "command": 179,
+            }
+        return await self.send_command(
+            sysid, compid,
+            mavutil.mavlink.MAV_CMD_DO_SET_HOME,
+            0, 0, 0, 0,
+            float(lat), float(lng), float(alt),
+        )
+
+    async def set_roi_location(self, sysid: int, compid: int, lat: float, lng: float, alt: float) -> Dict[str, Any]:
+        """MAV_CMD_DO_SET_ROI_LOCATION (195)."""
+        if not self.conn:
+            return {
+                "accepted": False,
+                "mav_result": -1,
+                "mav_result_text": "NO_CONNECTION",
+                "reason": "no_connection",
+                "command": int(mavutil.mavlink.MAV_CMD_DO_SET_ROI_LOCATION),
+            }
+        return await self.send_command(
+            sysid, compid,
+            mavutil.mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+            0, 0, 0, 0,
+            float(lat), float(lng), float(alt),
+        )
+
+    async def clear_roi(self, sysid: int, compid: int) -> Dict[str, Any]:
+        """MAV_CMD_DO_SET_ROI_NONE (197)."""
+        if not self.conn:
+            return {
+                "accepted": False,
+                "mav_result": -1,
+                "mav_result_text": "NO_CONNECTION",
+                "reason": "no_connection",
+                "command": int(mavutil.mavlink.MAV_CMD_DO_SET_ROI_NONE),
+            }
+        return await self.send_command(
+            sysid,
+            compid,
+            mavutil.mavlink.MAV_CMD_DO_SET_ROI_NONE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
     def fetch_parameters(self, sysid: int, compid: int):
         if not self.conn: return False
         self.conn.mav.param_request_list_send(sysid, compid)
@@ -408,6 +632,13 @@ class LinkManager:
             try:
                 # Try explicit pyserial close if it's a serial port
                 if hasattr(self.conn, 'port') and hasattr(self.conn.port, 'close'):
+                    try:
+                        if hasattr(self.conn.port, "reset_input_buffer"):
+                            self.conn.port.reset_input_buffer()
+                        if hasattr(self.conn.port, "reset_output_buffer"):
+                            self.conn.port.reset_output_buffer()
+                    except Exception:
+                        pass
                     self.conn.port.close()
                     logger.info("Explicitly closed underlying OS serial port.")
             except Exception as e:
@@ -432,12 +663,19 @@ class LinkManager:
             # Wait for tasks to clean up
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
-            
+
+        self.vehicles.clear()
+        self.primary_sysid = None
+        self.primary_compid = None
+        self._streams_sent.clear()
+        self.last_seq = -1
+        if getattr(self, "adsb_store", None):
+            self.adsb_store.clear()
         self.purge_socket()
         self.last_heartbeat_time = 0.0
         self.last_message_time = 0.0
         self._telemetry_seen_during_handshake.clear()
-            
+
         for fwd_conn in self.forward_conns:
             try:
                 fwd_conn.close()
