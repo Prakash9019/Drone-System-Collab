@@ -64,16 +64,40 @@ async def schedule_sitl_auto_connect(
     if not cs:
         return {"ok": False, "error": "empty_connection_string"}
     try:
-        try:
-            await link_manager.close()
-        except Exception:
-            pass
-        await asyncio.sleep(0.35)
+        current_state = getattr(getattr(link_manager, "connection_state", None), "value", "")
+        current_cs = (getattr(link_manager, "connection_string", "") or "").strip()
+        running = bool(getattr(link_manager, "running", False))
+
+        # If we are already on the requested endpoint and healthy, do nothing.
+        if running and current_cs == cs and current_state in ("CONNECTED", "ACTIVE"):
+            logger.info("SITL auto-connect skipped (already connected): %s", cs)
+            return {"ok": True, "skipped": True, "connection_state": current_state}
+
+        # Switch transport only when changing endpoints. Avoid needless close/open churn.
+        if running and current_cs and current_cs != cs:
+            logger.info("SITL auto-connect switching endpoint %s -> %s", current_cs, cs)
+            try:
+                await link_manager.close()
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+
         link_manager.original_connection_string = cs
         link_manager.connection_string = cs
-        ok = await link_manager.connect()
-        logger.info("SITL auto-connect finished ok=%s state=%s url=%s", ok, link_manager.connection_state, cs)
-        return {"ok": bool(ok), "connection_state": link_manager.connection_state.value}
+
+        # SITL/MAVProxy may need a few seconds after process spawn.
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            ok = await link_manager.connect()
+            state = getattr(getattr(link_manager, "connection_state", None), "value", "UNKNOWN")
+            if ok:
+                logger.info("SITL auto-connect finished ok=%s state=%s url=%s attempt=%d", ok, state, cs, attempt)
+                return {"ok": True, "connection_state": state, "attempt": attempt}
+            if attempt < attempts:
+                await asyncio.sleep(1.0 + (attempt * 0.5))
+        state = getattr(getattr(link_manager, "connection_state", None), "value", "UNKNOWN")
+        logger.warning("SITL auto-connect failed after retries state=%s url=%s", state, cs)
+        return {"ok": False, "connection_state": state, "attempts": attempts}
     except Exception as e:
         logger.warning("SITL auto-connect failed: %s", e)
         return {"ok": False, "error": str(e)}

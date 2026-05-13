@@ -17,6 +17,7 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
   const [alongSpacingM, setAlongSpacingM] = useState(14);
   const [altitudeM, setAltitudeM] = useState(50);
   const [useSpline, setUseSpline] = useState(false);
+  const [gridError, setGridError] = useState('');
 
   useEffect(() => {
     if (seed?.lat != null && !Number.isNaN(Number(seed.lat))) setLat(Number(seed.lat));
@@ -42,20 +43,25 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
   }, [lat, lng, widthM, lengthM, headingDeg, lineSpacingM, alongSpacingM, altitudeM, useSpline]);
 
   const run = (mode) => {
-    const wps = buildSurveyWaypoints({
-      centerLat: lat,
-      centerLng: lng,
-      widthM,
-      lengthM,
-      headingDeg,
-      lineSpacingM,
-      alongSpacingM,
-      altitudeM,
-      command: useSpline ? MAV_CMD_NAV_SPLINE_WAYPOINT : MAV_CMD_NAV_WAYPOINT,
-    });
-    if (mode === 'replace') replaceWaypoints(wps);
-    else appendWaypoints(wps);
-    onClose();
+    setGridError('');
+    try {
+      const wps = buildSurveyWaypoints({
+        centerLat: lat,
+        centerLng: lng,
+        widthM,
+        lengthM,
+        headingDeg,
+        lineSpacingM,
+        alongSpacingM,
+        altitudeM,
+        command: useSpline ? MAV_CMD_NAV_SPLINE_WAYPOINT : MAV_CMD_NAV_WAYPOINT,
+      });
+      if (mode === 'replace') replaceWaypoints(wps);
+      else appendWaypoints(wps);
+      onClose();
+    } catch (e) {
+      setGridError(e?.message || 'Failed to generate survey grid.');
+    }
   };
 
   return (
@@ -137,6 +143,11 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
           Estimated waypoints: <strong style={{ color: 'var(--text-primary)' }}>{previewCount}</strong>
         </div>
+        {gridError && (
+          <div style={{ fontSize: 12, color: '#fca5a5', marginBottom: 10 }}>
+            {gridError}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <button type="button" className="btn-toolbar" onClick={onClose}>
             Cancel

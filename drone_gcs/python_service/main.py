@@ -37,6 +37,7 @@ sitl_manager = None
 osd_manager = None
 
 _sitl_bg_tasks: set[asyncio.Task] = set()
+_sitl_auto_connect_task: asyncio.Task | None = None
 
 
 def _register_bg_task(task: asyncio.Task) -> None:
@@ -111,6 +112,13 @@ async def get_mission(mission_type: str = "MISSION"):
         raise HTTPException(status_code=500, detail="Mission manager not initialized")
     
     items = await mission_manager.download_mission(mission_type=mission_type)
+    ts = mission_manager.transfer_status or {}
+    if ts.get("ok") is False:
+        raise HTTPException(status_code=500, detail={
+            "error": "mission_download_failed",
+            "mission_type": mission_type.upper(),
+            "transfer": ts,
+        })
     return {"items": [item.to_dict() for item in items], "mission_type": mission_type.upper()}
 
 
@@ -129,13 +137,24 @@ async def upload_mission(request: MissionTransferRequest):
     if success:
         return {"status": "success", "mission_type": request.mission_type.upper()}
     else:
-        raise HTTPException(status_code=500, detail="Mission upload failed")
+        raise HTTPException(status_code=500, detail={
+            "error": "mission_upload_failed",
+            "mission_type": request.mission_type.upper(),
+            "transfer": mission_manager.transfer_status,
+        })
 
 @app.get("/fence")
 async def get_fence():
     if not mission_manager:
         raise HTTPException(status_code=500, detail="Mission manager not initialized")
     items = await mission_manager.download_mission(mission_type="FENCE")
+    ts = mission_manager.transfer_status or {}
+    if ts.get("ok") is False:
+        raise HTTPException(status_code=500, detail={
+            "error": "fence_download_failed",
+            "mission_type": "FENCE",
+            "transfer": ts,
+        })
     return {"items": [item.to_dict() for item in items], "mission_type": "FENCE"}
 
 @app.post("/fence/upload")
@@ -145,7 +164,11 @@ async def upload_fence(request: MissionTransferRequest):
     success = await mission_manager.upload_mission(request.items, mission_type="FENCE")
     if success:
         return {"status": "success", "mission_type": "FENCE"}
-    raise HTTPException(status_code=500, detail="Fence upload failed")
+    raise HTTPException(status_code=500, detail={
+        "error": "fence_upload_failed",
+        "mission_type": "FENCE",
+        "transfer": mission_manager.transfer_status,
+    })
 
 @app.get("/fence/status")
 async def fence_status():
@@ -200,6 +223,13 @@ async def get_rally():
     if not mission_manager:
         raise HTTPException(status_code=500, detail="Mission manager not initialized")
     items = await mission_manager.download_mission(mission_type="RALLY")
+    ts = mission_manager.transfer_status or {}
+    if ts.get("ok") is False:
+        raise HTTPException(status_code=500, detail={
+            "error": "rally_download_failed",
+            "mission_type": "RALLY",
+            "transfer": ts,
+        })
     return {"items": [item.to_dict() for item in items], "mission_type": "RALLY"}
 
 @app.post("/rally/upload")
@@ -209,7 +239,11 @@ async def upload_rally(request: MissionTransferRequest):
     success = await mission_manager.upload_mission(request.items, mission_type="RALLY")
     if success:
         return {"status": "success", "mission_type": "RALLY"}
-    raise HTTPException(status_code=500, detail="Rally upload failed")
+    raise HTTPException(status_code=500, detail={
+        "error": "rally_upload_failed",
+        "mission_type": "RALLY",
+        "transfer": mission_manager.transfer_status,
+    })
 
 class ParameterSetRequest(BaseModel):
     param_id: str
@@ -677,6 +711,7 @@ async def simulation_capabilities_route(sitl_cmd: str = ""):
 
 @app.post("/simulation/start")
 async def simulation_start(req: SimulationStartRequest):
+    global _sitl_auto_connect_task
     if not sitl_manager:
         raise HTTPException(status_code=500, detail="SITL manager not initialized")
     extra_list = shlex.split(req.extra_sim_args) if req.extra_sim_args.strip() else []
@@ -696,6 +731,9 @@ async def simulation_start(req: SimulationStartRequest):
         and link_manager
         and req.mavlink_connection_string.strip()
     ):
+        # Keep only one auto-connect worker to avoid close/reconnect races.
+        if _sitl_auto_connect_task and not _sitl_auto_connect_task.done():
+            _sitl_auto_connect_task.cancel()
         task = asyncio.create_task(
             schedule_sitl_auto_connect(
                 link_manager,
@@ -703,6 +741,7 @@ async def simulation_start(req: SimulationStartRequest):
                 req.auto_connect_delay_s,
             )
         )
+        _sitl_auto_connect_task = task
         _register_bg_task(task)
     return result
 

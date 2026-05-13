@@ -10,6 +10,18 @@ import { UploadCloud, DownloadCloud, Trash2, Grid3x3 } from 'lucide-react';
 
 const API_URL = 'http://localhost:8080';
 
+const extractErrText = (err, fallback) => {
+  const d = err?.response?.data;
+  if (typeof d?.detail === 'string') return d.detail;
+  if (d?.detail?.error) {
+    const tr = d.detail.transfer;
+    if (tr?.error) return `${d.detail.error}: ${tr.error}`;
+    return d.detail.error;
+  }
+  if (d?.error) return d.error;
+  return fallback || err?.message || 'Request failed';
+};
+
 const FlightPlanner = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -158,7 +170,7 @@ const FlightPlanner = () => {
       setStatusMsg(`Successfully read ${loaded.length} ${missionType} items from vehicle.`);
     } catch (err) {
       console.error(err);
-      setStatusMsg('Failed to read mission.');
+      setStatusMsg(extractErrText(err, 'Failed to read mission.'));
     } finally {
       setLoading(false);
     }
@@ -178,7 +190,7 @@ const FlightPlanner = () => {
       setStatusMsg(`${missionType} uploaded successfully!`);
     } catch (err) {
       console.error(err);
-      setStatusMsg('Failed to upload mission.');
+      setStatusMsg(extractErrText(err, 'Failed to upload mission.'));
     } finally {
       setLoading(false);
     }
@@ -215,7 +227,7 @@ const FlightPlanner = () => {
       setFenceStatus(res.data);
     } catch (err) {
       console.error(err);
-      setStatusMsg('Failed to apply fence configuration.');
+      setStatusMsg(extractErrText(err, 'Failed to apply fence configuration.'));
     } finally {
       setLoading(false);
     }
@@ -265,11 +277,12 @@ const FlightPlanner = () => {
     return best;
   }, [missionType, waypoints, vehicle?.position?.lat, vehicle?.position?.lng]);
 
+  const inAutoMode = currentMode === 'AUTO' || currentMode.startsWith('AUTO ');
   const canStartMission =
     !loading &&
     waypoints.length > 0 &&
     !!vehicle?.status?.armed &&
-    currentMode === 'AUTO';
+    inAutoMode;
 
   return (
     <div className="flight-planner">
@@ -380,12 +393,12 @@ const FlightPlanner = () => {
           <button className="btn-toolbar" onClick={() => setMode('GUIDED')} disabled={loading}>Set GUIDED</button>
           <button className="btn-toolbar primary" onClick={startMission} disabled={!canStartMission}>Start Mission</button>
           <span className="status-msg" style={{ opacity: 0.86 }}>
-            Flow: Read -> edit -> Write -> ARM -> TAKEOFF -> AUTO -> Start Mission
+            {" Flow: Read -> edit -> Write -> ARM -> TAKEOFF -> AUTO -> Start Mission"}
           </span>
           <span className="status-msg" style={{ opacity: 0.86 }}>
             Checklist:
             {' '}[{vehicle?.status?.armed ? 'ARMED' : 'NOT ARMED'}]
-            {' '}[{currentMode === 'AUTO' ? 'AUTO' : `MODE=${currentMode}`}]
+            {' '}[{inAutoMode ? 'AUTO' : `MODE=${currentMode}`}]
             {' '}[{waypoints.length > 0 ? 'MISSION LOADED' : 'NO MISSION'}]
           </span>
         </div>
@@ -437,14 +450,14 @@ const FlightPlanner = () => {
             Apply Fence Config
           </button>
           <span className="status-msg" style={{ opacity: 0.86 }}>
-            Fence workflow: draw polygon on map -> pick inclusion/exclusion -> Write -> Enable + action -> Apply Fence Config
+            {"Fence workflow: draw polygon on map -> pick inclusion/exclusion -> Write -> Enable + action -> Apply Fence Config"}
           </span>
         </div>
       )}
       {missionType === 'RALLY' && (
         <div className="mission-toolbar" style={{ minHeight: 50, height: 'auto', gap: 10, flexWrap: 'wrap' }}>
           <span className="status-msg">
-            Rally workflow: add emergency landing points on map/table -> Write to vehicle.
+            {" Rally workflow: add emergency landing points on map/table -> Write to vehicle."}
           </span>
           {nearestRally ? (
             <span className="status-msg">

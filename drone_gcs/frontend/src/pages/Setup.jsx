@@ -28,6 +28,10 @@ const Setup = () => {
   }), [vehicle]);
 
   const runCalibration = async (kind) => {
+    if (preflightSummary.armed && kind !== 'reboot') {
+      setStatus(`${kind} blocked: disarm vehicle before calibration.`);
+      return;
+    }
     setBusy(kind);
     setStatus(`Running ${kind}...`);
     try {
@@ -57,6 +61,11 @@ const Setup = () => {
             GPS: fix {preflightSummary.gpsFix}, sats {preflightSummary.sats}, HDOP {preflightSummary.hdop > 0 ? preflightSummary.hdop.toFixed(2) : 'N/A'}
             {' '}| Battery: {preflightSummary.battery}% | Armed: {preflightSummary.armed ? 'YES' : 'NO'}
           </div>
+          {preflightSummary.armed && (
+            <div style={{ marginBottom: 12, color: '#fca5a5', fontSize: 12 }}>
+              Disarm before accelerometer/compass/level/ESC calibration. Reboot is still allowed.
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))', gap: 10 }}>
             {CAL_ITEMS.map((c) => (
               <div key={c.id} style={{ border: '1px solid var(--border-color)', borderRadius: 8, padding: 12 }}>
@@ -64,7 +73,7 @@ const Setup = () => {
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '6px 0 10px' }}>{c.hint}</div>
                 <button
                   className="btn-toolbar primary"
-                  disabled={!!busy}
+                  disabled={!!busy || (preflightSummary.armed && c.id !== 'reboot')}
                   onClick={() => runCalibration(c.id)}
                 >
                   {busy === c.id ? 'Running...' : 'Run'}

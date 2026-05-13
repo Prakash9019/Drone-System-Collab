@@ -29,15 +29,26 @@ const ActionsTab = ({ vehicleState }) => {
         await axios.post(`${API}/mode`, { mode: action.mode });
         setStatus(`✓ Mode set to ${action.mode}`);
       } else {
-        await axios.post(`${API}/command`, {
+        const res = await axios.post(`${API}/mavlink/command`, {
           command: action.command,
           p1: action.p1 || 0, p2: 0, p3: 0, p4: 0,
           p5: 0, p6: 0, p7: action.p7 || 0,
         });
-        setStatus(`✓ ${action.label} sent`);
+        const accepted = res?.data?.accepted;
+        if (accepted === false) {
+          setStatus(`✗ ${action.label} rejected: ${res?.data?.mav_result_text || 'FAILED'}`);
+        } else {
+          setStatus(`✓ ${action.label} sent`);
+        }
       }
     } catch (err) {
-      setStatus(`✗ ${action.label} failed: ${err.message}`);
+      const d = err?.response?.data;
+      const reason =
+        (typeof d?.detail === 'string' && d.detail) ||
+        d?.error ||
+        d?.details?.error ||
+        err.message;
+      setStatus(`✗ ${action.label} failed: ${reason}`);
     }
     setBusy(false);
   };

@@ -39,7 +39,16 @@ def handle_message(msg: any, state: VehicleState):
         state.last_heartbeat = time.time()
         state.status.system_type = msg.type
         state.status.armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-        state.status.mode = decode_mode(msg.custom_mode, msg.type)
+        # Prefer pymavlink's mode decoder when available; fallback to local mapping.
+        try:
+            mode_text = mavutil.mode_string_v10(msg)
+        except Exception:
+            mode_text = ""
+        mode_text = (mode_text or "").strip()
+        if mode_text and mode_text != "Mode(0x00000000)":
+            state.status.mode = mode_text
+        else:
+            state.status.mode = decode_mode(msg.custom_mode, msg.type)
         
     elif msg_type == 'SYS_STATUS':
         state.battery.voltage = msg.voltage_battery / 1000.0  # mV to V
@@ -65,7 +74,10 @@ def handle_message(msg: any, state: VehicleState):
         state.position.lng = msg.lon / 1e7
         state.position.alt_amsl = msg.alt / 1000.0
         state.position.alt_rel = msg.relative_alt / 1000.0
-        hdg = getattr(msg, "heading", None)
+        # MAVLink field is usually `hdg` (centi-deg, UINT16_MAX when unknown).
+        hdg = getattr(msg, "hdg", None)
+        if hdg is None:
+            hdg = getattr(msg, "heading", None)
         if hdg is not None and hdg != 65535 and hdg != 65536:
             try:
                 state.velocity.heading = float(hdg) / 100.0

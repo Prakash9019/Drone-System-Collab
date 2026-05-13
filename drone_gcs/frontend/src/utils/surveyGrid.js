@@ -39,8 +39,13 @@ export function buildSurveyWaypoints(opts) {
     command = 16,
   } = opts;
 
-  const lat0 = Number(centerLat);
-  const lng0 = Number(centerLng);
+  const latIn = Number(centerLat);
+  const lngIn = Number(centerLng);
+  if (!Number.isFinite(latIn) || !Number.isFinite(lngIn)) {
+    throw new Error('Survey center latitude/longitude must be valid numbers.');
+  }
+  const lat0 = Math.max(-89.9, Math.min(89.9, latIn));
+  const lng0 = ((lngIn + 540) % 360) - 180;
   const w = Math.max(10, Number(widthM) || 50);
   const L = Math.max(10, Number(lengthM) || 50);
   const h = Number(headingDeg) || 0;
@@ -67,10 +72,13 @@ export function buildSurveyWaypoints(opts) {
 
   const mLat = mPerDegLat();
   const mLng = mPerDegLng(lat0);
+  if (!Number.isFinite(mLng) || Math.abs(mLng) < 1e-6) {
+    throw new Error('Survey center latitude is too close to pole; choose a different center.');
+  }
 
   const toLatLng = (eastM, northM) => ({
-    lat: lat0 + northM / mLat,
-    lng: lng0 + eastM / mLng,
+    lat: Math.max(-89.9, Math.min(89.9, lat0 + northM / mLat)),
+    lng: ((lng0 + eastM / mLng + 540) % 360) - 180,
   });
 
   const points = [];

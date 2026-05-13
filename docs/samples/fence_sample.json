@@ -1,0 +1,61 @@
+{
+  "mission_type": "FENCE",
+  "items": [
+    {
+      "seq": 0,
+      "frame": 3,
+      "command": 5001,
+      "current": 1,
+      "autocontinue": 1,
+      "param1": 4,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.385,
+      "lng": 78.486,
+      "alt": 0
+    },
+    {
+      "seq": 1,
+      "frame": 3,
+      "command": 5001,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 4,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.385,
+      "lng": 78.488,
+      "alt": 0
+    },
+    {
+      "seq": 2,
+      "frame": 3,
+      "command": 5001,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 4,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.387,
+      "lng": 78.488,
+      "alt": 0
+    },
+    {
+      "seq": 3,
+      "frame": 3,
+      "command": 5001,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 4,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.387,
+      "lng": 78.486,
+      "alt": 0
+    }
+  ]
+}

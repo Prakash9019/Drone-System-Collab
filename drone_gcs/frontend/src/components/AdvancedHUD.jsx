@@ -12,10 +12,13 @@ const AdvancedHUD = ({ vehicleState, operational }) => {
   // 1 degree of pitch = 3px of vertical movement in the CSS
   const pitchOffset = pitchDeg * 3;
 
-  // Heading calculation for the top compass ribbon
-  const heading = velocity.heading || 0;
+  const yawDeg = Number.isFinite(attitude.yaw) ? ((attitude.yaw * 180) / Math.PI + 360) % 360 : null;
+  // Heading calculation for the top compass ribbon (fallback to yaw if heading is missing)
+  const heading = Number.isFinite(velocity.heading) ? Number(velocity.heading) : (yawDeg ?? 0);
   // If compass ribbon is e.g. 3600px wide (10px per degree), offset is -heading * 10
-  const compassOffset = -heading * 10;
+  const compassOffset = -(heading * 10) + 1800;
+  const headingText = `${Math.round(heading)}°`;
+  const isArmed = Boolean(status.armed);
 
   return (
     <div className="advanced-hud">
@@ -28,6 +31,10 @@ const AdvancedHUD = ({ vehicleState, operational }) => {
           {/* We create a repeating pattern of degrees for the compass ribbon in CSS */}
         </div>
         <div className="hud-compass-marker">▼</div>
+        <div className="hud-compass-readout">
+          <span className="hud-heading">{headingText}</span>
+          <span className={`hud-arm-dot ${isArmed ? 'armed' : 'disarmed'}`} title={isArmed ? 'Vehicle armed' : 'Vehicle disarmed'} />
+        </div>
       </div>
 
       {/* 2. Artificial Horizon Layer */}
@@ -71,7 +78,7 @@ const AdvancedHUD = ({ vehicleState, operational }) => {
         {/* Status Text overlay */}
         <div className="hud-status-text">
           <div className={`armed-text ${status.armed ? 'armed' : 'disarmed'}`}>
-            {status.armed ? 'ARMED' : 'DISARMED'}
+            {isArmed ? 'ARMED' : 'DISARMED'}
           </div>
           <div className="mode-text">{status.mode}</div>
           {operational?.label && (

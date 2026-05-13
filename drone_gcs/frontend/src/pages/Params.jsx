@@ -23,8 +23,18 @@ const Params = () => {
   const diffRightRef = useRef(null);
   const [paramMeta, setParamMeta] = useState({});
   const [twoParamResult, setTwoParamResult] = useState(null);
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const raw = localStorage.getItem('drone_gcs_param_favorites');
+      const arr = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(arr) ? arr : []);
+    } catch {
+      return new Set();
+    }
+  });
 
   const CATEGORIES = {
+    Favorites: [],
     PID: ['ATC_', 'PSC_', 'RATE_', 'Q_A_RAT'],
     EKF: ['EK', 'AHRS_'],
     GPS: ['GPS_', 'GPS'],
@@ -40,6 +50,22 @@ const Params = () => {
     RC: ['RC', 'SERVO', 'CH'],
     Power: ['PWR', 'BATT'],
     Failsafe: ['FS_', 'FAILSAFE'],
+  };
+
+  const persistFavorites = (nextSet) => {
+    setFavorites(nextSet);
+    try {
+      localStorage.setItem('drone_gcs_param_favorites', JSON.stringify([...nextSet]));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const toggleFavorite = (paramId) => {
+    const next = new Set(favorites);
+    if (next.has(paramId)) next.delete(paramId);
+    else next.add(paramId);
+    persistFavorites(next);
   };
 
   const handleRefresh = async () => {
@@ -208,6 +234,7 @@ const Params = () => {
 
   const inCategory = (key) => {
     if (category === 'ALL') return true;
+    if (category === 'Favorites') return favorites.has(key);
     const prefixes = CATEGORIES[category] || [];
     return prefixes.some((p) => key.startsWith(p));
   };
@@ -295,6 +322,7 @@ const Params = () => {
         <table className="waypoint-table">
           <thead>
             <tr>
+              <th>Fav</th>
               <th>Parameter ID</th>
               <th>Units</th>
               <th>Description</th>
@@ -306,13 +334,25 @@ const Params = () => {
           <tbody>
             {filteredParams.length === 0 ? (
               <tr>
-                <td colSpan="6" style={{ textAlign: 'center', padding: '20px' }}>No parameters found. Click Fetch All.</td>
+                <td colSpan="7" style={{ textAlign: 'center', padding: '20px' }}>No parameters found. Click Fetch All.</td>
               </tr>
             ) : (
               visibleParams.map(([key, val]) => {
                 const m = paramMeta[key] || paramMeta[String(key).toUpperCase()] || {};
                 return (
                 <tr key={key}>
+                  <td style={{ textAlign: 'center' }}>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      onClick={() => toggleFavorite(key)}
+                      title={favorites.has(key) ? 'Unpin favorite' : 'Pin favorite'}
+                    >
+                      <span style={{ color: favorites.has(key) ? '#fbbf24' : '#64748b' }}>
+                        {favorites.has(key) ? '★' : '☆'}
+                      </span>
+                    </button>
+                  </td>
                   <td style={{ fontWeight: 'bold' }}>{key}</td>
                   <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{m.units != null && m.units !== '' ? m.units : '—'}</td>
                   <td style={{ fontSize: 12, maxWidth: 260, color: 'var(--text-secondary)' }} title={m.description}>{m.description || '—'}</td>

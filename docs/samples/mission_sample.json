@@ -1,0 +1,47 @@
+{
+  "mission_type": "MISSION",
+  "items": [
+    {
+      "seq": 0,
+      "frame": 3,
+      "command": 22,
+      "current": 1,
+      "autocontinue": 1,
+      "param1": 0,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.3852,
+      "lng": 78.4868,
+      "alt": 30
+    },
+    {
+      "seq": 1,
+      "frame": 3,
+      "command": 16,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 0,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.3856,
+      "lng": 78.4874,
+      "alt": 40
+    },
+    {
+      "seq": 2,
+      "frame": 3,
+      "command": 16,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 0,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.386,
+      "lng": 78.4869,
+      "alt": 40
+    }
+  ]
+}

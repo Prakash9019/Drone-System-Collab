@@ -234,6 +234,9 @@ class MissionManager:
                 )
                 item_msg = await self.wait_for_message(['MISSION_ITEM_INT', 'MISSION_ITEM'], timeout=1.0, expected_mission_type=mission_type_value)
                 if item_msg and item_msg.seq == seq:
+                    is_int = item_msg.get_type() == "MISSION_ITEM_INT"
+                    raw_x = float(getattr(item_msg, "x", 0.0))
+                    raw_y = float(getattr(item_msg, "y", 0.0))
                     item = MissionItem(
                         seq=item_msg.seq,
                         frame=item_msg.frame,
@@ -244,8 +247,10 @@ class MissionManager:
                         param2=item_msg.param2,
                         param3=item_msg.param3,
                         param4=item_msg.param4,
-                        lat=(item_msg.x / 1e7) if hasattr(item_msg, 'x') else item_msg.x,
-                        lng=(item_msg.y / 1e7) if hasattr(item_msg, 'y') else item_msg.y,
+                        # MISSION_ITEM_INT encodes x/y in 1e7-scaled ints, while
+                        # MISSION_ITEM uses x/y as float degrees directly.
+                        lat=(raw_x / 1e7) if is_int else raw_x,
+                        lng=(raw_y / 1e7) if is_int else raw_y,
                         alt=item_msg.z
                     )
                     items.append(item)

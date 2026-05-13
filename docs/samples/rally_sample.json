@@ -1,0 +1,33 @@
+{
+  "mission_type": "RALLY",
+  "items": [
+    {
+      "seq": 0,
+      "frame": 3,
+      "command": 5100,
+      "current": 1,
+      "autocontinue": 1,
+      "param1": 0,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.3848,
+      "lng": 78.4864,
+      "alt": 40
+    },
+    {
+      "seq": 1,
+      "frame": 3,
+      "command": 5100,
+      "current": 0,
+      "autocontinue": 1,
+      "param1": 0,
+      "param2": 0,
+      "param3": 0,
+      "param4": 0,
+      "lat": 17.3872,
+      "lng": 78.4878,
+      "alt": 40
+    }
+  ]
+}

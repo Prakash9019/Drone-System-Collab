@@ -11,12 +11,18 @@ const SEVERITY_COLORS = {
 };
 
 const MessagesTab = ({ vehicleState }) => {
+  const consoleRef = useRef(null);
   const bottomRef = useRef(null);
   const messages = vehicleState?.status_messages || [];
 
-  // Auto-scroll when new messages arrive
+  // Auto-scroll only if user is already near the bottom.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = consoleRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (nearBottom) {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
   }, [messages.length]);
 
   return (
@@ -24,15 +30,16 @@ const MessagesTab = ({ vehicleState }) => {
       {messages.length === 0 ? (
         <div className="tab-empty">No messages received yet.</div>
       ) : (
-        <div className="messages-console">
+        <div className="messages-console" ref={consoleRef}>
           {messages.map((msg, i) => {
             const ts = msg.timestamp
               ? new Date(msg.timestamp * 1000).toLocaleTimeString()
               : '--:--:--';
             const severityLabel = SEVERITY_LABELS[msg.severity] || 'INFO';
             const color = SEVERITY_COLORS[msg.severity] || '#94a3b8';
+            const rowKey = `${msg.timestamp || i}-${msg.severity || 0}-${String(msg.text || '')}`;
             return (
-              <div key={i} className="message-row">
+              <div key={rowKey} className="message-row">
                 <span className="msg-ts">{ts}</span>
                 <span className="msg-severity" style={{ color }}>[{severityLabel}]</span>
                 <span className="msg-text">{msg.text}</span>
