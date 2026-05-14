@@ -1,34 +1,68 @@
 import { create } from 'zustand';
 import axios from 'axios';
 import { deriveOperationalPhase } from '../utils/operationalState';
+import { applyInboundTelemetryPayload } from '../telemetry/telemetryWebSocketBridge';
+import { selectPrimaryVehicle } from '../telemetry/telemetrySelectors';
 
 const API_URL = 'http://localhost:8080';
 
-/** Vehicle snapshot for the backend `primary_sysid`, or first known vehicle. */
-export const selectPrimaryVehicle = (state) => {
-  const t = state.telemetry;
-  const id = state.primarySysId;
-  if (id != null && t[id] !== undefined) return t[id];
-  const keys = Object.keys(t);
-  return keys.length ? t[keys[0]] : undefined;
-};
+export {
+  selectPrimaryVehicle,
+  selectPrimaryVehicleRaw,
+  selectPrimaryVehicleDerived,
+  selectStaleTelemetry,
+  selectNormalizedTelemetry,
+  getSchemaVersion,
+  getTelemetryEngine,
+  selectFleetTelemetrySummary,
+  selectAllVehicleIds,
+  selectAttitudeDisplay,
+  selectOperationalFromStore,
+  selectSyncTransport,
+} from '../telemetry/telemetrySelectors';
+
+export { reduceTelemetryWebSocketMessage, snapshotFromGet, patchSyncTransport } from '../telemetry/telemetrySyncReducer';
+export { selectCommandState } from '../telemetry/commandSelectors';
+export { selectMissionSyncState } from '../telemetry/missionSelectors';
+export { selectMapVehicle } from '../telemetry/mapSelectors';
+export { selectPreflightStatus } from '../telemetry/preflightSelectors';
 
 const useTelemetryStore = create((set, get) => ({
   connected: false,
+  mode: 'LIVE', // 'LIVE' | 'REPLAY'
+  replayStatus: {
+    is_recording: false,
+    recording_session_id: null,
+    is_playing: false,
+    is_paused: false,
+    playback_session_id: null,
+    progress_s: 0,
+    duration_s: 0,
+    speed: 1.0,
+  },
   connectionState: 'DISCONNECTED',
-  /** Backend primary vehicle sysid (string key) */
   primarySysId: null,
-  /** Vehicles seen on link (from CONNECTION_STATUS) */
   vehiclesRoster: [],
-  /** ADS-B tracks from ADSB_VEHICLE (Phase C) */
   adsbTracks: [],
+  /** Raw per-vehicle payloads from backend (includes `telemetry_engine` when Node engine enabled). */
   telemetry: {},
+  /**
+   * Transport + freshness meta (browser client). Not MAVLink link state — see `connectionState`.
+   */
+  sync: {
+    wsTransport: 'IDLE',
+    lastInboundAt: null,
+    inboundSeq: 0,
+    reconnectAttempts: 0,
+    lastEngineEnvelope: null,
+  },
   ws: null,
   connectRequestInFlight: false,
   connectRequestPromise: null,
   operational: { phase: 'DISCONNECTED', label: 'Disconnected', tone: 'muted' },
   operationalHistory: [],
   commandStatus: {},
+  engineCommandStatus: {},
   commandHistory: [],
   paramSyncStatus: {
     state: 'IDLE',
@@ -38,13 +72,32 @@ const useTelemetryStore = create((set, get) => ({
     progress_percent: 0,
     last_error: '',
   },
+  missionSyncStatus: {
+    session_id: null,
+    phase: 'IDLE',
+    mission_type: 'MISSION',
+    direction: null,
+    total: 0,
+    current: 0,
+    ok: null,
+    last_ack: null,
+    error: '',
+    updated_at: 0.0,
+    mission_version: null,
+    duration_s: 0.0,
+    retries: 0,
+  },
+  preflightStatus: {
+    ready_to_arm: false,
+    checks: [],
+    timestamp: 0,
+  },
   connectionConfig: {
     connection_string: 'auto',
     baudrate: 115200,
   },
 
   connect: () => {
-    // Avoid duplicate connections
     const existing = get().ws;
     if (existing && existing.readyState < 2) return;
 
@@ -52,98 +105,38 @@ const useTelemetryStore = create((set, get) => ({
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      set({ ws });
+      set((s) => ({
+        ws,
+        sync: {
+          ...(s.sync || {}),
+          wsTransport: 'OPEN',
+        },
+      }));
       console.log('[WS] Connected to telemetry stream');
     };
 
     ws.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'TELEMETRY_UPDATE') {
-          const connectionState = payload?.data?.connection_state || get().connectionState;
-          const vid =
-            payload.vehicle_id != null && payload.vehicle_id !== ''
-              ? String(payload.vehicle_id)
-              : null;
-          set((state) => {
-            const nextTelemetry = {
-              ...state.telemetry,
-              ...(vid ? { [vid]: payload.data } : {}),
-            };
-            const primaryId = state.primarySysId;
-            const primaryVehicle =
-              primaryId != null && nextTelemetry[primaryId] !== undefined
-                ? nextTelemetry[primaryId]
-                : vid
-                  ? nextTelemetry[vid]
-                  : undefined;
-            const nextOperational = deriveOperationalPhase({ connectionState, vehicle: primaryVehicle });
-            const samePhase = state.operational?.phase === nextOperational.phase;
-            const nextOpHistory = samePhase
-              ? state.operationalHistory
-              : [
-                  ...state.operationalHistory,
-                  { at: Date.now(), from: state.operational?.phase || null, to: nextOperational.phase, label: nextOperational.label },
-                ].slice(-80);
-            return ({
-            connected: connectionState === 'CONNECTED' || connectionState === 'ACTIVE',
-            connectionState,
-            telemetry: nextTelemetry,
-            operational: nextOperational,
-            operationalHistory: nextOpHistory,
-          });
-          });
-        } else if (payload.type === 'CONNECTION_STATUS') {
-          const connectionState = payload?.data?.connection_state || 'DISCONNECTED';
-          const ps = payload?.data?.primary_sysid;
-          const roster = Array.isArray(payload?.data?.vehicles) ? payload.data.vehicles : [];
-          set((state) => {
-            const nextOperational = deriveOperationalPhase({
-              connectionState,
-              vehicle:
-                ps != null && ps !== '' ? state.telemetry[String(ps)] : state.telemetry[state.primarySysId],
-            });
-            const samePhase = state.operational?.phase === nextOperational.phase;
-            const nextOpHistory = samePhase
-              ? state.operationalHistory
-              : [
-                  ...state.operationalHistory,
-                  { at: Date.now(), from: state.operational?.phase || null, to: nextOperational.phase, label: nextOperational.label },
-                ].slice(-80);
-            return ({
-            connectionState,
-            connected: connectionState === 'CONNECTED' || connectionState === 'ACTIVE',
-            vehiclesRoster: roster,
-            ...(ps != null && ps !== ''
-              ? { primarySysId: String(ps) }
-              : connectionState === 'DISCONNECTED'
-                ? { primarySysId: null, vehiclesRoster: [], telemetry: {}, adsbTracks: [] }
-                : {}),
-            operational: nextOperational,
-            operationalHistory: nextOpHistory,
-          });
-          });
-        } else if (payload.type === 'ADSB_UPDATE') {
-          set({
-            adsbTracks: Array.isArray(payload.tracks) ? payload.tracks : [],
-          });
-        } else if (payload.type === 'PARAM_SYNC_STATUS') {
-          set({ paramSyncStatus: payload.data || get().paramSyncStatus });
-        }
+        applyInboundTelemetryPayload(get, set, event.data);
       } catch (err) {
         console.error('[WS] Failed to parse telemetry', err);
       }
     };
 
     ws.onclose = () => {
-      set({
+      set((s) => ({
         connected: false,
         ws: null,
         adsbTracks: [],
         vehiclesRoster: [],
         operational: deriveOperationalPhase({ connectionState: 'DISCONNECTED', vehicle: null }),
         operationalHistory: [],
-      });
+        sync: {
+          ...(s.sync || {}),
+          wsTransport: 'CLOSED',
+          reconnectAttempts: ((s.sync && s.sync.reconnectAttempts) || 0) + 1,
+        },
+      }));
       console.log('[WS] Disconnected. Reconnecting in 2s...');
       setTimeout(() => get().connect(), 2000);
     };
@@ -154,7 +147,6 @@ const useTelemetryStore = create((set, get) => ({
     };
   },
 
-  // Start MAVLink connection on the backend
   setConnectionConfig: (config) => {
     set((state) => ({ connectionConfig: { ...state.connectionConfig, ...config } }));
   },
@@ -168,14 +160,18 @@ const useTelemetryStore = create((set, get) => ({
     set({ connectRequestInFlight: true, connectionState: 'CONNECTING' });
 
     const payload = get().connectionConfig;
-    const request = axios.post(`${API_URL}/api/connection/start`, payload)
+    const request = axios
+      .post(`${API_URL}/api/connection/start`, payload)
       .then((res) => {
         const backendState = res?.data?.connection_state;
         if (backendState) {
           set((state) => ({
             connectionState: backendState,
             connected: backendState === 'CONNECTED' || backendState === 'ACTIVE',
-            operational: deriveOperationalPhase({ connectionState: backendState, vehicle: selectPrimaryVehicle(state) }),
+            operational: deriveOperationalPhase({
+              connectionState: backendState,
+              vehicle: selectPrimaryVehicle(state),
+            }),
           }));
         }
         console.log('[API] Connection start:', res.data);
@@ -198,7 +194,6 @@ const useTelemetryStore = create((set, get) => ({
     return request;
   },
 
-  // Stop MAVLink connection on the backend (violent purge)
   stopConnection: async () => {
     try {
       const res = await axios.post(`${API_URL}/api/connection/stop`);
@@ -279,7 +274,7 @@ const useTelemetryStore = create((set, get) => ({
 
   loadParameterCache: async (maxAgeSeconds = 3600) => {
     const res = await axios.post(`${API_URL}/api/parameters/cache/load`, null, {
-      params: { max_age_s: maxAgeSeconds }
+      params: { max_age_s: maxAgeSeconds },
     });
     if (res?.data?.sync_status) {
       set({ paramSyncStatus: res.data.sync_status });
@@ -297,7 +292,9 @@ const useTelemetryStore = create((set, get) => ({
   setFlightMode: async (mode) => {
     const startedAt = Date.now();
     set((state) => ({
-      commandHistory: [...state.commandHistory, { at: startedAt, command: `mode:${mode}`, state: 'pending' }].slice(-120),
+      commandHistory: [...state.commandHistory, { at: startedAt, command: `mode:${mode}`, state: 'pending' }].slice(
+        -120
+      ),
     }));
     try {
       const res = await axios.post(`${API_URL}/api/mode`, { mode });
@@ -308,7 +305,13 @@ const useTelemetryStore = create((set, get) => ({
     } catch (err) {
       const d = err.response?.data;
       set((state) => ({
-        commandHistory: [...state.commandHistory, { at: Date.now(), command: `mode:${mode}`, state: 'error', error: d?.error || err.message, response: d || null }].slice(-120),
+        commandHistory: [...state.commandHistory, {
+          at: Date.now(),
+          command: `mode:${mode}`,
+          state: 'error',
+          error: d?.error || err.message,
+          response: d || null,
+        }].slice(-120),
       }));
       throw err;
     }

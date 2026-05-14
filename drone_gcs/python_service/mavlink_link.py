@@ -7,24 +7,9 @@ from vehicle_state import VehicleState, ConnectionState
 from message_handlers import handle_message
 from connection_manager import auto_detect_connection
 from adsb_store import AdsbTrafficStore
+from command_manager import CommandManager
 
 logger = logging.getLogger(__name__)
-
-
-def mav_result_text(result: int) -> str:
-    names = {
-        mavutil.mavlink.MAV_RESULT_ACCEPTED: "ACCEPTED",
-        mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED: "TEMPORARILY_REJECTED",
-        mavutil.mavlink.MAV_RESULT_DENIED: "DENIED",
-        mavutil.mavlink.MAV_RESULT_UNSUPPORTED: "UNSUPPORTED",
-        mavutil.mavlink.MAV_RESULT_FAILED: "FAILED",
-        mavutil.mavlink.MAV_RESULT_IN_PROGRESS: "IN_PROGRESS",
-        mavutil.mavlink.MAV_RESULT_COMMAND_LONG_ONLY: "COMMAND_LONG_ONLY",
-        mavutil.mavlink.MAV_RESULT_COMMAND_INT_ONLY: "COMMAND_INT_ONLY",
-    }
-    r = int(result)
-    return names.get(r, f"MAV_RESULT_{r}")
-
 
 class LinkManager:
     def __init__(self, connection_string: str = "auto", baudrate: int = 115200, udp_forwarding_endpoints: List[str] = None):
@@ -44,7 +29,6 @@ class LinkManager:
         self.last_heartbeat_time = 0.0
         self.last_message_time = 0.0
         self.last_seq = -1
-        self.pending_commands = {}
         self._tasks: List[asyncio.Task] = []
         self._connect_lock = asyncio.Lock()
         self._connect_task: Optional[asyncio.Task] = None
@@ -62,6 +46,7 @@ class LinkManager:
         self.message_counts_window_started_at = time.time()
         self._streams_sent: Set[tuple] = set()
         self.adsb_store = AdsbTrafficStore()
+        self.command_manager = CommandManager(self)
 
     async def connect(self):
         if self._connect_lock.locked():
@@ -326,9 +311,8 @@ class LinkManager:
                             self.mission_manager.handle_mission_message(msg)
                             
                     if msg.get_type() == 'COMMAND_ACK':
-                        cmd = msg.command
-                        if cmd in self.pending_commands:
-                            self.pending_commands[cmd] = msg.result
+                        if hasattr(self, 'command_manager') and self.command_manager:
+                            self.command_manager.on_command_ack(msg)
                         
                     sysid = msg.get_srcSystem()
                     compid = msg.get_srcComponent()
@@ -450,55 +434,9 @@ class LinkManager:
     async def send_command(
         self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3
     ) -> Dict[str, Any]:
-        if not self.conn:
-            return {
-                "accepted": False,
-                "mav_result": -1,
-                "mav_result_text": "NO_CONNECTION",
-                "reason": "no_connection",
-                "command": int(command),
-            }
-
-        for attempt in range(retries):
-            self.pending_commands[command] = None
-            try:
-                self.conn.mav.command_long_send(
-                    sysid, compid,
-                    command,
-                    0,  # confirmation
-                    p1, p2, p3, p4, p5, p6, p7
-                )
-            except Exception as e:
-                logger.error(f"Failed to send command {command}: {e}")
-
-            timeout = time.time() + (5.0 if int(command) == 400 else 3.0)
-            while time.time() < timeout:
-                if self.pending_commands.get(command) is not None:
-                    result = self.pending_commands[command]
-                    del self.pending_commands[command]
-                    ok = result == mavutil.mavlink.MAV_RESULT_ACCEPTED
-                    if not ok:
-                        logger.warning(f"Command {command} rejected with result {result}")
-                    return {
-                        "accepted": ok,
-                        "mav_result": int(result),
-                        "mav_result_text": mav_result_text(int(result)),
-                        "reason": "mavlink" if not ok else "accepted",
-                        "command": int(command),
-                    }
-                await asyncio.sleep(0.1)
-
-            logger.warning(f"Command {command} timeout, retrying {attempt + 1}/{retries}...")
-
-        if command in self.pending_commands:
-            del self.pending_commands[command]
-        return {
-            "accepted": False,
-            "mav_result": -1,
-            "mav_result_text": "TIMEOUT",
-            "reason": "timeout",
-            "command": int(command),
-        }
+        return await self.command_manager.execute_command(
+            sysid, compid, command, p1, p2, p3, p4, p5, p6, p7, is_int=False, retries=retries
+        )
 
     def list_flight_modes(self) -> List[str]:
         if not self.conn:
@@ -564,7 +502,7 @@ class LinkManager:
                 "reason": "no_connection",
                 "command": 179,
             }
-        return await self.send_command(
+        return await self.command_manager.execute_command(
             sysid, compid,
             mavutil.mavlink.MAV_CMD_DO_SET_HOME,
             0, 0, 0, 0,
@@ -581,7 +519,7 @@ class LinkManager:
                 "reason": "no_connection",
                 "command": int(mavutil.mavlink.MAV_CMD_DO_SET_ROI_LOCATION),
             }
-        return await self.send_command(
+        return await self.command_manager.execute_command(
             sysid, compid,
             mavutil.mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
             0, 0, 0, 0,
@@ -598,7 +536,7 @@ class LinkManager:
                 "reason": "no_connection",
                 "command": int(mavutil.mavlink.MAV_CMD_DO_SET_ROI_NONE),
             }
-        return await self.send_command(
+        return await self.command_manager.execute_command(
             sysid,
             compid,
             mavutil.mavlink.MAV_CMD_DO_SET_ROI_NONE,

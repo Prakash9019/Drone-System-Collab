@@ -18,6 +18,8 @@ app.use(express.json());
 
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 52 * 1024 * 1024 } });
 
+const { TelemetryCoreEngine, TelemetryEventBus } = require('./telemetry');
+
 // Set up WebSocket server attached to Express HTTP server
 const server = app.listen(HTTP_PORT, () => {
   console.log(`Node.js API Gateway running on port ${HTTP_PORT}`);
@@ -38,6 +40,9 @@ function broadcast(data) {
     }
   });
 }
+
+const telemetryBus = new TelemetryEventBus();
+const telemetryEngine = new TelemetryCoreEngine({ broadcast, bus: telemetryBus });
 
 // Connection lifecycle proxies
 app.post('/api/connection/start', async (req, res) => {
@@ -87,10 +92,9 @@ async function runZmqSubscriber() {
 
   try {
     for await (const [msg] of sock) {
-      // The Python backend sends JSON strings
+      // The Python backend sends JSON strings → telemetry core (enrich + broadcast)
       const payload = msg.toString();
-      // Broadcast directly to WS clients
-      broadcast(payload);
+      telemetryEngine.processZmqFrameString(payload);
     }
   } catch (err) {
     console.error("ZeroMQ Error:", err);
@@ -99,6 +103,15 @@ async function runZmqSubscriber() {
 
 // Start ZMQ
 runZmqSubscriber();
+
+// Telemetry engine (read-only debug)
+app.get('/api/telemetry/engine/snapshot', (req, res) => {
+  try {
+    res.json(telemetryEngine.getDebugSnapshot());
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
 
 // REST Proxy Routes
 app.get('/api/state', async (req, res) => {

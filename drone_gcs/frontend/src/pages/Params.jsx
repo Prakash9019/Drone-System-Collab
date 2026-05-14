@@ -1,14 +1,14 @@
 import React, { useRef, useState, useEffect } from 'react';
 import axios from 'axios';
 import { Search, RefreshCw, Save, Upload, Download, GitCompare } from 'lucide-react';
-import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
+import useTelemetryStore from '../store/useTelemetryStore';
+import { selectParameterSyncState, selectGroupedParameters, filterParameters, PARAMETER_CATEGORIES } from '../telemetry/parameterSelectors';
 
 const Params = () => {
-  const paramSyncStatus = useTelemetryStore((state) => state.paramSyncStatus);
+  const syncStateInfo = useTelemetryStore(selectParameterSyncState);
+  const paramEntriesRaw = useTelemetryStore((state) => selectGroupedParameters(state, paramMeta, favorites));
   const refreshParameterStatus = useTelemetryStore((state) => state.refreshParameterStatus);
   const loadParameterCache = useTelemetryStore((state) => state.loadParameterCache);
-  const vehicle = useTelemetryStore(selectPrimaryVehicle) || {};
-  const parameters = vehicle.parameters || {};
 
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
@@ -32,25 +32,6 @@ const Params = () => {
       return new Set();
     }
   });
-
-  const CATEGORIES = {
-    Favorites: [],
-    PID: ['ATC_', 'PSC_', 'RATE_', 'Q_A_RAT'],
-    EKF: ['EK', 'AHRS_'],
-    GPS: ['GPS_', 'GPS'],
-    Battery: ['BATT', 'BAT_'],
-    RTL: ['RTL_', 'WP_YAW_BEHAVIOR'],
-    Fence: ['FENCE_', 'FNC_'],
-    Logging: ['LOG_', 'LOG'],
-    Sensors: ['INS_', 'COMPASS_', 'BARO_'],
-    FlightModes: ['FLTMODE', 'MODE'],
-    Navigation: ['WPNAV_', 'NAVL1_', 'MIS_'],
-    ATC: ['ATC_'],
-    OSD: ['OSD_'],
-    RC: ['RC', 'SERVO', 'CH'],
-    Power: ['PWR', 'BATT'],
-    Failsafe: ['FS_', 'FAILSAFE'],
-  };
 
   const persistFavorites = (nextSet) => {
     setFavorites(nextSet);
@@ -76,7 +57,6 @@ const Params = () => {
     } catch (err) {
       console.error('Failed to request parameters', err);
     }
-    // Note: parameters populate over time via telemetry stream
     setTimeout(() => setLoading(false), 2000);
   };
 
@@ -89,7 +69,6 @@ const Params = () => {
         param_id: paramId,
         param_value: parseFloat(val)
       });
-      // Clear edit state after saving
       setEditValues(prev => {
         const next = { ...prev };
         delete next[paramId];
@@ -232,48 +211,46 @@ const Params = () => {
     return () => clearInterval(t);
   }, [refreshParameterStatus]);
 
-  const inCategory = (key) => {
-    if (category === 'ALL') return true;
-    if (category === 'Favorites') return favorites.has(key);
-    const prefixes = CATEGORIES[category] || [];
-    return prefixes.some((p) => key.startsWith(p));
-  };
-
-  const filteredParams = Object.entries(parameters)
-    .filter(([key]) => key.toLowerCase().includes(searchTerm.toLowerCase()))
-    .filter(([key]) => inCategory(key))
-    .sort((a, b) => {
-      if (sortBy === 'value') return Number(a[1]) - Number(b[1]);
-      return a[0].localeCompare(b[0]);
-    });
+  const filteredParams = filterParameters(paramEntriesRaw, category, searchTerm, favorites, sortBy);
 
   const pageSize = 120;
   const visibleParams = filteredParams.slice(rowStart, rowStart + pageSize);
 
+  const { isDisconnected, isStale, syncState, received, reported, missing, progressPercent, cacheLoaded, cacheSource } = syncStateInfo;
+
   return (
     <div className="flight-planner" style={{ padding: '20px', backgroundColor: 'var(--bg-panel)' }}>
+      {isDisconnected && (
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 10, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <h1 style={{ color: 'red', fontWeight: 'bold' }}>DISCONNECTED</h1>
+        </div>
+      )}
+      
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h2>Vehicle Parameters</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <h2>Vehicle Parameters</h2>
+          {isStale && <span style={{ backgroundColor: 'orange', color: 'black', padding: '2px 6px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold' }}>STALE</span>}
+        </div>
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="btn-toolbar" onClick={handleRefresh} disabled={loading}>
+          <button className="btn-toolbar" onClick={handleRefresh} disabled={loading || isDisconnected}>
             <RefreshCw size={18} className={loading ? "spin" : ""} />
             {loading ? 'Requesting...' : 'Fetch All'}
           </button>
           <button className="btn-toolbar" onClick={() => refreshParameterStatus()}>Sync Status</button>
-          <button className="btn-toolbar" onClick={() => loadParameterCache(3600)}>Load Cache</button>
-          <button className="btn-toolbar" onClick={handleExport}><Download size={16} /> JSON</button>
-          <button className="btn-toolbar" onClick={handleExportParam}><Download size={16} /> .param</button>
-          <button className="btn-toolbar" onClick={openImport}><Upload size={16} /> JSON</button>
-          <button type="button" className="btn-toolbar" onClick={() => importParamRef.current?.click()}>
+          <button className="btn-toolbar" onClick={() => loadParameterCache(3600)} disabled={isDisconnected}>Load Cache</button>
+          <button className="btn-toolbar" onClick={handleExport} disabled={isDisconnected}><Download size={16} /> JSON</button>
+          <button className="btn-toolbar" onClick={handleExportParam} disabled={isDisconnected}><Download size={16} /> .param</button>
+          <button className="btn-toolbar" onClick={openImport} disabled={isDisconnected}><Upload size={16} /> JSON</button>
+          <button type="button" className="btn-toolbar" onClick={() => importParamRef.current?.click()} disabled={isDisconnected}>
             <Upload size={16} /> .param
           </button>
-          <label className="btn-toolbar" style={{ cursor: 'pointer' }}>
+          <label className={`btn-toolbar ${isDisconnected ? 'disabled' : ''}`} style={{ cursor: isDisconnected ? 'default' : 'pointer' }}>
             <GitCompare size={16} /> JSON
-            <input type="file" accept=".json" style={{ display: 'none' }} onChange={handleCompare} />
+            <input type="file" accept=".json" style={{ display: 'none' }} onChange={handleCompare} disabled={isDisconnected} />
           </label>
-          <label className="btn-toolbar" style={{ cursor: 'pointer' }}>
+          <label className={`btn-toolbar ${isDisconnected ? 'disabled' : ''}`} style={{ cursor: isDisconnected ? 'default' : 'pointer' }}>
             <GitCompare size={16} /> .param
-            <input type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleCompareParam} />
+            <input type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleCompareParam} disabled={isDisconnected} />
           </label>
           <input ref={importRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleImport} />
           <input ref={importParamRef} type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleImportParam} />
@@ -281,13 +258,13 @@ const Params = () => {
       </div>
       {opMsg && <div style={{ marginBottom: 10, color: 'var(--text-secondary)', fontSize: 12 }}>{opMsg}</div>}
       <div style={{ marginBottom: '10px', color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '12px' }}>
-        Sync: {paramSyncStatus.state} | {paramSyncStatus.received}/{paramSyncStatus.reported} | Missing: {paramSyncStatus.missing} | Progress: {paramSyncStatus.progress_percent}%
-        {" "} | Cache: {paramSyncStatus.cache_loaded ? `YES(${paramSyncStatus.cache_source || 'disk'})` : 'NO'}
+        Sync: {syncState} | {received}/{reported} | Missing: {missing} | Progress: {progressPercent}%
+        {" "} | Cache: {cacheLoaded ? `YES(${cacheSource || 'disk'})` : 'NO'}
       </div>
       <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
         <select className="status-search" value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: 180 }}>
           <option value="ALL">ALL Categories</option>
-          {Object.keys(CATEGORIES).map((c) => <option key={c} value={c}>{c}</option>)}
+          {Object.keys(PARAMETER_CATEGORIES).map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
         <select className="status-search" value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ width: 140 }}>
           <option value="name">Sort: Name</option>
@@ -337,8 +314,7 @@ const Params = () => {
                 <td colSpan="7" style={{ textAlign: 'center', padding: '20px' }}>No parameters found. Click Fetch All.</td>
               </tr>
             ) : (
-              visibleParams.map(([key, val]) => {
-                const m = paramMeta[key] || paramMeta[String(key).toUpperCase()] || {};
+              visibleParams.map(([key, val, m]) => {
                 return (
                 <tr key={key}>
                   <td style={{ textAlign: 'center' }}>
@@ -364,6 +340,7 @@ const Params = () => {
                       value={editValues[key] !== undefined ? editValues[key] : ''}
                       onChange={(e) => setEditValues({ ...editValues, [key]: e.target.value })}
                       placeholder={String(val)}
+                      disabled={isDisconnected}
                       style={{
                         width: '120px',
                         backgroundColor: editValues[key] !== undefined ? 'rgba(245,158,11,0.15)' : undefined,
@@ -376,7 +353,7 @@ const Params = () => {
                       className="btn-toolbar primary" 
                       style={{ padding: '4px 12px' }}
                       onClick={() => handleSave(key)}
-                      disabled={editValues[key] === undefined || editValues[key] === ''}
+                      disabled={editValues[key] === undefined || editValues[key] === '' || isDisconnected}
                     >
                       <Save size={14} /> Save
                     </button>

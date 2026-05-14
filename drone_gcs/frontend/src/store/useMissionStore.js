@@ -173,5 +173,6 @@ const useMissionStore = create((set, get) => ({
 }));
 
 export { FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION };
+export { selectMapMissionOverlay } from '../telemetry/mapSelectors';
 
 export default useMissionStore;

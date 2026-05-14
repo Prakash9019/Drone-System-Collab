@@ -16,6 +16,7 @@ from mavlink_link import LinkManager
 from mission_manager import MissionManager
 from mission_models import MissionItem, MissionTransferRequest
 from telemetry_pub import TelemetryPublisher
+from preflight_manager import PreflightManager
 from parameter_manager import ParameterSyncManager
 from sitl_manager import SITLManager
 from sitl_orchestrator import schedule_sitl_auto_connect, simulation_capabilities
@@ -24,6 +25,12 @@ from log_analyzer import analyze_file, analysis_to_csv
 from parameter_metadata import get_metadata_map
 from connection_manager import list_serial_ports_detailed
 from param_format import parse_param_text, format_param_text, diff_param_dicts
+
+class ReplayStartRequest(BaseModel):
+    session_id: str
+
+class ReplaySeekRequest(BaseModel):
+    time_s: float
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
@@ -35,6 +42,7 @@ telemetry_publisher = None
 parameter_manager = None
 sitl_manager = None
 osd_manager = None
+preflight_manager = None
 
 _sitl_bg_tasks: set[asyncio.Task] = set()
 _sitl_auto_connect_task: asyncio.Task | None = None
@@ -47,7 +55,7 @@ def _register_bg_task(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global link_manager, mission_manager, telemetry_publisher, parameter_manager, sitl_manager, osd_manager
+    global link_manager, mission_manager, telemetry_publisher, parameter_manager, sitl_manager, osd_manager, preflight_manager
     logger.info("Starting up MAVLink Service...")
     
     # Use auto-detect by default to find serial ports, fallback to SITL if needed
@@ -70,9 +78,10 @@ async def lifespan(app: FastAPI):
     link_manager.parameter_manager = parameter_manager
     sitl_manager = SITLManager()
     osd_manager = OSDProfileManager()
+    preflight_manager = PreflightManager()
     
     # Setup ZMQ Telemetry Publisher
-    telemetry_publisher = TelemetryPublisher(port=5556)
+    telemetry_publisher = TelemetryPublisher(port=5556, preflight_manager=preflight_manager)
     telemetry_publisher.start()
     
     tasks = [
@@ -127,6 +136,74 @@ async def mission_transfer_status():
     if not mission_manager:
         raise HTTPException(status_code=500, detail="Mission manager not initialized")
     return mission_manager.transfer_status
+
+@app.get("/mission/history")
+async def mission_history():
+    if not mission_manager:
+        raise HTTPException(status_code=500, detail="Mission manager not initialized")
+    return {"history": list(mission_manager.mission_history)}
+
+@app.get("/preflight/history")
+async def get_preflight_history():
+    if not preflight_manager:
+        raise HTTPException(status_code=500, detail="Preflight manager not initialized")
+    return {"history": list(preflight_manager.history)}
+
+@app.post("/replay/record/start")
+async def start_recording():
+    if not telemetry_publisher or not telemetry_publisher.replay_manager:
+        raise HTTPException(status_code=500, detail="Replay manager not initialized")
+    session_id = telemetry_publisher.replay_manager.start_recording()
+    return {"session_id": session_id}
+
+@app.post("/replay/record/stop")
+async def stop_recording():
+    if not telemetry_publisher or not telemetry_publisher.replay_manager:
+        raise HTTPException(status_code=500, detail="Replay manager not initialized")
+    telemetry_publisher.replay_manager.stop_recording()
+    return {"status": "stopped"}
+
+@app.get("/replay/sessions")
+async def list_replay_sessions():
+    if not telemetry_publisher or not telemetry_publisher.replay_manager:
+        raise HTTPException(status_code=500, detail="Replay manager not initialized")
+    sessions = telemetry_publisher.replay_manager.list_sessions()
+    return {"sessions": sessions}
+
+@app.post("/replay/playback/start")
+async def start_playback(req: ReplayStartRequest):
+    if not telemetry_publisher or not telemetry_publisher.replay_manager:
+        raise HTTPException(status_code=500, detail="Replay manager not initialized")
+    try:
+        await telemetry_publisher.replay_manager.start_playback(req.session_id)
+        return {"status": "playing", "session_id": req.session_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/replay/playback/stop")
+async def stop_playback():
+    if not telemetry_publisher or not telemetry_publisher.replay_manager:
+        raise HTTPException(status_code=500, detail="Replay manager not initialized")
+    await telemetry_publisher.replay_manager.stop_playback()
+    return {"status": "stopped"}
+
+@app.post("/replay/playback/pause")
+async def pause_playback():
+    if telemetry_publisher and telemetry_publisher.replay_manager:
+        telemetry_publisher.replay_manager.pause_playback()
+    return {"status": "paused"}
+
+@app.post("/replay/playback/resume")
+async def resume_playback():
+    if telemetry_publisher and telemetry_publisher.replay_manager:
+        telemetry_publisher.replay_manager.resume_playback()
+    return {"status": "resumed"}
+
+@app.post("/replay/playback/seek")
+async def seek_playback(req: ReplaySeekRequest):
+    if telemetry_publisher and telemetry_publisher.replay_manager:
+        telemetry_publisher.replay_manager.seek_playback(req.time_s)
+    return {"status": "seeking", "time_s": req.time_s}
 
 @app.post("/mission/upload")
 async def upload_mission(request: MissionTransferRequest):
