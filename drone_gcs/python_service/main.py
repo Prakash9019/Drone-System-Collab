@@ -740,6 +740,29 @@ async def diff_two_param_files(req: TwoParamTextRequest):
     return {"count": len(diffs), "diffs": diffs, "parsed_left": len(left), "parsed_right": len(right)}
 
 
+@app.post("/parameters/reset")
+async def reset_parameters_to_defaults():
+    """Reset all vehicle parameters to firmware defaults via MAV_CMD_PREFLIGHT_STORAGE (245, p1=2).
+    A vehicle reboot is required for the reset to take full effect."""
+    if not link_manager or not link_manager.primary_sysid:
+        raise HTTPException(status_code=500, detail="No vehicle connected")
+
+    out = await link_manager.send_command(
+        link_manager.primary_sysid,
+        link_manager.primary_compid,
+        245,    # MAV_CMD_PREFLIGHT_STORAGE
+        2.0,    # param1=2: reset to defaults
+        0, 0, 0, 0, 0, 0,
+    )
+    if parameter_manager:
+        parameter_manager.parameters.clear()
+    return {
+        "status": "reset_sent" if out.get("accepted") else "reset_queued",
+        "message": "Parameter reset command sent. Reboot the flight controller for changes to take full effect.",
+        **out,
+    }
+
+
 @app.post("/calibration/run")
 async def run_calibration(req: CalibrationRequest):
     if not link_manager or not link_manager.primary_sysid:

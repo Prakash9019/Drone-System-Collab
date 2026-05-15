@@ -1,28 +1,25 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
-import { Search, RefreshCw, Save, Upload, Download, GitCompare } from 'lucide-react';
+import { Search, RefreshCw, Save, Upload, Download, GitCompare, RotateCcw } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import useTelemetryStore from '../store/useTelemetryStore';
 import { selectParameterSyncState, selectGroupedParameters, filterParameters, PARAMETER_CATEGORIES } from '../telemetry/parameterSelectors';
 
-const Params = () => {
-  const syncStateInfo = useTelemetryStore(selectParameterSyncState);
-  const paramEntriesRaw = useTelemetryStore((state) => selectGroupedParameters(state, paramMeta, favorites));
-  const refreshParameterStatus = useTelemetryStore((state) => state.refreshParameterStatus);
-  const loadParameterCache = useTelemetryStore((state) => state.loadParameterCache);
+// ── Stable module-level selectors (must be outside the component so references
+//    are constant across renders — Zustand v5 / useSyncExternalStore requirement) ──
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [editValues, setEditValues] = useState({});
-  const [category, setCategory] = useState('ALL');
-  const [sortBy, setSortBy] = useState('name');
-  const [rowStart, setRowStart] = useState(0);
-  const [opMsg, setOpMsg] = useState('');
-  const importRef = useRef(null);
-  const importParamRef = useRef(null);
-  const diffLeftRef = useRef(null);
-  const diffRightRef = useRef(null);
+const selectRawParameters = (state) => {
+  const targetId = state.primarySysId;
+  const vehicle = targetId && state.telemetry ? state.telemetry[targetId] : null;
+  return vehicle?.parameters ?? null;
+};
+
+const selectRefreshParameterStatus = (state) => state.refreshParameterStatus;
+const selectLoadParameterCache = (state) => state.loadParameterCache;
+
+const Params = () => {
+  // ── State declarations MUST come before any hooks that reference them ──
   const [paramMeta, setParamMeta] = useState({});
-  const [twoParamResult, setTwoParamResult] = useState(null);
   const [favorites, setFavorites] = useState(() => {
     try {
       const raw = localStorage.getItem('drone_gcs_param_favorites');
@@ -33,21 +30,57 @@ const Params = () => {
     }
   });
 
-  const persistFavorites = (nextSet) => {
+  // ── Zustand hooks — using stable selectors or useShallow for object selectors ──
+  // useShallow prevents the "getSnapshot should be cached" infinite-loop warning
+  // because selectParameterSyncState returns a new plain object each call.
+  const syncStateInfo = useTelemetryStore(useShallow(selectParameterSyncState));
+  const rawParameters = useTelemetryStore(selectRawParameters);
+  const refreshParameterStatus = useTelemetryStore(selectRefreshParameterStatus);
+  const loadParameterCache = useTelemetryStore(selectLoadParameterCache);
+
+  // ── Derived state — computed outside the Zustand hook so the selector is stable ──
+  const paramEntriesRaw = useMemo(() => {
+    if (!rawParameters) return [];
+    return Object.entries(rawParameters).map(([key, val]) => {
+      const meta = paramMeta[key] || paramMeta[String(key).toUpperCase()] || {};
+      return [key, val, meta];
+    });
+  }, [rawParameters, paramMeta]);
+
+  const [searchTerm, setSearchTerm] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [editValues, setEditValues] = useState({});
+  const [category, setCategory] = useState('ALL');
+  const [sortBy, setSortBy] = useState('name');
+  const [rowStart, setRowStart] = useState(0);
+  const [opMsg, setOpMsg] = useState('');
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [twoParamResult, setTwoParamResult] = useState(null);
+
+  const importRef = useRef(null);
+  const importParamRef = useRef(null);
+  const diffLeftRef = useRef(null);
+  const diffRightRef = useRef(null);
+
+  const persistFavorites = useCallback((nextSet) => {
     setFavorites(nextSet);
     try {
       localStorage.setItem('drone_gcs_param_favorites', JSON.stringify([...nextSet]));
     } catch {
       // ignore storage errors
     }
-  };
+  }, []);
 
-  const toggleFavorite = (paramId) => {
-    const next = new Set(favorites);
-    if (next.has(paramId)) next.delete(paramId);
-    else next.add(paramId);
-    persistFavorites(next);
-  };
+  const toggleFavorite = useCallback((paramId) => {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(paramId)) next.delete(paramId);
+      else next.add(paramId);
+      persistFavorites(next);
+      return next;
+    });
+  }, [persistFavorites]);
 
   const handleRefresh = async () => {
     setLoading(true);
@@ -63,19 +96,19 @@ const Params = () => {
   const handleSave = async (paramId) => {
     const val = editValues[paramId];
     if (val === undefined) return;
-    
     try {
       await axios.post('http://localhost:8080/api/parameters/set', {
         param_id: paramId,
-        param_value: parseFloat(val)
+        param_value: parseFloat(val),
       });
-      setEditValues(prev => {
+      setEditValues((prev) => {
         const next = { ...prev };
         delete next[paramId];
         return next;
       });
+      setOpMsg(`${paramId} set to ${val}`);
     } catch (err) {
-      console.error('Failed to set parameter', err);
+      setOpMsg(`Failed to set ${paramId}: ${err.response?.data?.detail || err.message}`);
     }
   };
 
@@ -97,7 +130,7 @@ const Params = () => {
 
   const handleExportParam = async () => {
     try {
-      const res = await axios.get('http://localhost:8080/api/parameters/export.param', { responseType: 'blob' });
+      const res = await axios.get('http://localhost:8080/api/parameters/export/param', { responseType: 'blob' });
       const url = URL.createObjectURL(res.data);
       const a = document.createElement('a');
       a.href = url;
@@ -109,8 +142,6 @@ const Params = () => {
       setOpMsg(`Export .param failed: ${err.message}`);
     }
   };
-
-  const openImport = () => importRef.current?.click();
 
   const parseImportFile = async (file) => {
     const txt = await file.text();
@@ -178,6 +209,20 @@ const Params = () => {
     }
   };
 
+  const handleResetToDefaults = async () => {
+    setResetBusy(true);
+    setShowResetConfirm(false);
+    try {
+      const res = await axios.post('http://localhost:8080/api/parameters/reset');
+      setOpMsg(`${res.data?.message || 'Reset command sent. Reboot required for changes to take effect.'}`);
+    } catch (err) {
+      const d = err.response?.data?.detail;
+      setOpMsg(typeof d === 'string' ? d : err.response?.data?.error || err.message || 'Reset failed');
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const runTwoParamDiff = async () => {
     const fa = diffLeftRef.current?.files?.[0];
     const fb = diffRightRef.current?.files?.[0];
@@ -211,7 +256,15 @@ const Params = () => {
     return () => clearInterval(t);
   }, [refreshParameterStatus]);
 
-  const filteredParams = filterParameters(paramEntriesRaw, category, searchTerm, favorites, sortBy);
+  // Reset rowStart when filter changes
+  useEffect(() => {
+    setRowStart(0);
+  }, [searchTerm, category]);
+
+  const filteredParams = useMemo(
+    () => filterParameters(paramEntriesRaw, category, searchTerm, favorites, sortBy),
+    [paramEntriesRaw, category, searchTerm, favorites, sortBy]
+  );
 
   const pageSize = 120;
   const visibleParams = filteredParams.slice(rowStart, rowStart + pageSize);
@@ -225,43 +278,81 @@ const Params = () => {
           <h1 style={{ color: 'red', fontWeight: 'bold' }}>DISCONNECTED</h1>
         </div>
       )}
-      
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+
+      {/* Reset confirmation dialog */}
+      {showResetConfirm && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 50, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: 10, padding: 28, maxWidth: 420, width: '90%' }}>
+            <h3 style={{ color: '#fca5a5', marginBottom: 12 }}>Reset All Parameters to Default?</h3>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8 }}>
+              This sends <code>MAV_CMD_PREFLIGHT_STORAGE (245, p1=2)</code> to the flight controller, which resets all parameters to factory/firmware defaults.
+            </p>
+            <p style={{ fontSize: 13, color: '#fbbf24', marginBottom: 20 }}>
+              A vehicle reboot is required for the reset to take full effect. All custom tuning, PID values, and settings will be lost.
+            </p>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button className="btn-toolbar danger" onClick={handleResetToDefaults}>
+                Yes, Reset to Defaults
+              </button>
+              <button className="btn-toolbar" onClick={() => setShowResetConfirm(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <h2>Vehicle Parameters</h2>
           {isStale && <span style={{ backgroundColor: 'orange', color: 'black', padding: '2px 6px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold' }}>STALE</span>}
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           <button className="btn-toolbar" onClick={handleRefresh} disabled={loading || isDisconnected}>
-            <RefreshCw size={18} className={loading ? "spin" : ""} />
+            <RefreshCw size={16} className={loading ? 'spin' : ''} />
             {loading ? 'Requesting...' : 'Fetch All'}
           </button>
           <button className="btn-toolbar" onClick={() => refreshParameterStatus()}>Sync Status</button>
           <button className="btn-toolbar" onClick={() => loadParameterCache(3600)} disabled={isDisconnected}>Load Cache</button>
-          <button className="btn-toolbar" onClick={handleExport} disabled={isDisconnected}><Download size={16} /> JSON</button>
-          <button className="btn-toolbar" onClick={handleExportParam} disabled={isDisconnected}><Download size={16} /> .param</button>
-          <button className="btn-toolbar" onClick={openImport} disabled={isDisconnected}><Upload size={16} /> JSON</button>
+          <button className="btn-toolbar" onClick={handleExport} disabled={isDisconnected}><Download size={14} /> JSON</button>
+          <button className="btn-toolbar" onClick={handleExportParam} disabled={isDisconnected}><Download size={14} /> .param</button>
+          <button className="btn-toolbar" onClick={() => importRef.current?.click()} disabled={isDisconnected}><Upload size={14} /> JSON</button>
           <button type="button" className="btn-toolbar" onClick={() => importParamRef.current?.click()} disabled={isDisconnected}>
-            <Upload size={16} /> .param
+            <Upload size={14} /> .param
           </button>
           <label className={`btn-toolbar ${isDisconnected ? 'disabled' : ''}`} style={{ cursor: isDisconnected ? 'default' : 'pointer' }}>
-            <GitCompare size={16} /> JSON
+            <GitCompare size={14} /> JSON
             <input type="file" accept=".json" style={{ display: 'none' }} onChange={handleCompare} disabled={isDisconnected} />
           </label>
           <label className={`btn-toolbar ${isDisconnected ? 'disabled' : ''}`} style={{ cursor: isDisconnected ? 'default' : 'pointer' }}>
-            <GitCompare size={16} /> .param
+            <GitCompare size={14} /> .param
             <input type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleCompareParam} disabled={isDisconnected} />
           </label>
+          <button
+            className="btn-toolbar danger"
+            onClick={() => setShowResetConfirm(true)}
+            disabled={isDisconnected || resetBusy}
+            title="Reset all parameters to firmware defaults (MAV_CMD_PREFLIGHT_STORAGE p1=2)"
+          >
+            <RotateCcw size={14} /> Reset Defaults
+          </button>
           <input ref={importRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleImport} />
           <input ref={importParamRef} type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleImportParam} />
         </div>
       </div>
-      {opMsg && <div style={{ marginBottom: 10, color: 'var(--text-secondary)', fontSize: 12 }}>{opMsg}</div>}
+
+      {opMsg && (
+        <div style={{ marginBottom: 10, color: opMsg.toLowerCase().includes('fail') || opMsg.toLowerCase().includes('error') ? '#fca5a5' : 'var(--text-secondary)', fontSize: 12, padding: '6px 10px', background: 'rgba(255,255,255,0.04)', borderRadius: 4 }}>
+          {opMsg}
+        </div>
+      )}
+
       <div style={{ marginBottom: '10px', color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '12px' }}>
         Sync: {syncState} | {received}/{reported} | Missing: {missing} | Progress: {progressPercent}%
-        {" "} | Cache: {cacheLoaded ? `YES(${cacheSource || 'disk'})` : 'NO'}
+        {' '} | Cache: {cacheLoaded ? `YES(${cacheSource || 'disk'})` : 'NO'}
       </div>
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
         <select className="status-search" value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: 180 }}>
           <option value="ALL">ALL Categories</option>
           {Object.keys(PARAMETER_CATEGORIES).map((c) => <option key={c} value={c}>{c}</option>)}
@@ -273,15 +364,15 @@ const Params = () => {
         <button className="btn-toolbar" onClick={() => setRowStart((v) => Math.max(0, v - pageSize))}>Prev</button>
         <button className="btn-toolbar" onClick={() => setRowStart((v) => Math.min(Math.max(filteredParams.length - pageSize, 0), v + pageSize))}>Next</button>
         <span style={{ alignSelf: 'center', fontFamily: 'monospace', fontSize: '12px' }}>
-          Showing {Math.min(filteredParams.length, rowStart + 1)}-{Math.min(filteredParams.length, rowStart + pageSize)} / {filteredParams.length}
+          Showing {Math.min(filteredParams.length, rowStart + 1)}–{Math.min(filteredParams.length, rowStart + pageSize)} / {filteredParams.length}
         </span>
       </div>
 
       <div style={{ position: 'relative', marginBottom: '20px' }}>
         <Search size={18} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--text-secondary)' }} />
-        <input 
-          type="text" 
-          placeholder="Search parameters..." 
+        <input
+          type="text"
+          placeholder="Search parameters..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           style={{
@@ -290,12 +381,12 @@ const Params = () => {
             backgroundColor: 'var(--bg-dark)',
             border: '1px solid var(--border-color)',
             color: 'white',
-            borderRadius: '6px'
+            borderRadius: '6px',
           }}
         />
       </div>
 
-      <div className="waypoint-table-container" style={{ height: 'calc(100vh - 200px)', overflowY: 'auto' }}>
+      <div className="waypoint-table-container" style={{ height: 'calc(100vh - 260px)', overflowY: 'auto' }}>
         <table className="waypoint-table">
           <thead>
             <tr>
@@ -311,11 +402,12 @@ const Params = () => {
           <tbody>
             {filteredParams.length === 0 ? (
               <tr>
-                <td colSpan="7" style={{ textAlign: 'center', padding: '20px' }}>No parameters found. Click Fetch All.</td>
+                <td colSpan="7" style={{ textAlign: 'center', padding: '20px' }}>
+                  No parameters found.{rawParameters === null ? ' Click Fetch All to load from vehicle.' : ''}
+                </td>
               </tr>
             ) : (
-              visibleParams.map(([key, val, m]) => {
-                return (
+              visibleParams.map(([key, val, m]) => (
                 <tr key={key}>
                   <td style={{ textAlign: 'center' }}>
                     <button
@@ -334,7 +426,7 @@ const Params = () => {
                   <td style={{ fontSize: 12, maxWidth: 260, color: 'var(--text-secondary)' }} title={m.description}>{m.description || '—'}</td>
                   <td style={{ fontFamily: 'monospace' }}>{val}</td>
                   <td>
-                    <input 
+                    <input
                       type="number"
                       className="alt-input"
                       value={editValues[key] !== undefined ? editValues[key] : ''}
@@ -349,8 +441,8 @@ const Params = () => {
                     />
                   </td>
                   <td>
-                    <button 
-                      className="btn-toolbar primary" 
+                    <button
+                      className="btn-toolbar primary"
                       style={{ padding: '4px 12px' }}
                       onClick={() => handleSave(key)}
                       disabled={editValues[key] === undefined || editValues[key] === '' || isDisconnected}
@@ -359,8 +451,7 @@ const Params = () => {
                     </button>
                   </td>
                 </tr>
-              );
-              })
+              ))
             )}
           </tbody>
         </table>
