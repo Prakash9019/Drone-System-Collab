@@ -1,6 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useShallow } from 'zustand/react/shallow';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import axios from 'axios';
@@ -8,7 +7,7 @@ import useMissionStore, {
   FENCE_CMD_INCLUSION,
   FENCE_CMD_EXCLUSION,
 } from '../store/useMissionStore';
-import useTelemetryStore, { selectPrimaryVehicle, selectMapVehicle } from '../store/useTelemetryStore';
+import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
 
 const API_URL = 'http://localhost:8080';
@@ -84,8 +83,31 @@ const MapEditor = () => {
   const selectWaypoint = useMissionStore((state) => state.selectWaypoint);
   const setMapInstance = useMissionStore((state) => state.setMapInstance);
 
-  const vehicleHome = useTelemetryStore(s => selectPrimaryVehicle(s)?.home);
-  const vehicleMapState = useTelemetryStore(useShallow(selectMapVehicle));
+  const rawVehicle = useTelemetryStore(s =>
+    (s.connectionState === 'DISCONNECTED' || !s.connected) ? null : selectPrimaryVehicle(s)
+  );
+  const vehicleHome = useMemo(() => rawVehicle?.home ?? null, [rawVehicle]);
+  const vehicleMapState = useMemo(() => {
+    if (!rawVehicle) return null;
+    const pos = rawVehicle.position || {};
+    const status = rawVehicle.status || {};
+    const isNullIsland = pos.lat === 0.0 && pos.lng === 0.0;
+    const hasValidGps = !isNullIsland || (status.gps_fix >= 3);
+    const heading = rawVehicle.velocity?.heading ?? null;
+    const attitudeYaw = rawVehicle.attitude?.yaw != null
+      ? (rawVehicle.attitude.yaw * 180 / Math.PI) : 0;
+    let finalHeading = heading;
+    if (finalHeading == null || finalHeading < 0) {
+      let yawDeg = attitudeYaw;
+      while (yawDeg < 0) yawDeg += 360;
+      while (yawDeg >= 360) yawDeg -= 360;
+      finalHeading = yawDeg;
+    }
+    return {
+      position: hasValidGps ? { lat: pos.lat, lng: pos.lng } : null,
+      heading: finalHeading,
+    };
+  }, [rawVehicle]);
 
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, lat: null, lng: null });
   const [selectedMarkerSeq, setSelectedMarkerSeq] = useState(null);
