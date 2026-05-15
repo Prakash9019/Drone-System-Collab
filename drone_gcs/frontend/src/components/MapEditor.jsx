@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useShallow } from 'zustand/react/shallow';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import axios from 'axios';
@@ -84,7 +85,7 @@ const MapEditor = () => {
   const setMapInstance = useMissionStore((state) => state.setMapInstance);
 
   const vehicleHome = useTelemetryStore(s => selectPrimaryVehicle(s)?.home);
-  const vehicleMapState = useTelemetryStore(s => selectMapVehicle(s));
+  const vehicleMapState = useTelemetryStore(useShallow(selectMapVehicle));
 
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, lat: null, lng: null });
   const [selectedMarkerSeq, setSelectedMarkerSeq] = useState(null);
