@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Search, RefreshCw, Save, Upload, Download, GitCompare, RotateCcw } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import useTelemetryStore from '../store/useTelemetryStore';
-import { selectParameterSyncState, selectGroupedParameters, filterParameters, PARAMETER_CATEGORIES } from '../telemetry/parameterSelectors';
+import { selectParameterSyncState, filterParameters, PARAMETER_CATEGORIES } from '../telemetry/parameterSelectors';
 
 // ── Stable module-level selectors (must be outside the component so references
 //    are constant across renders — Zustand v5 / useSyncExternalStore requirement) ──

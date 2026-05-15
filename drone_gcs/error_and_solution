@@ -261,3 +261,67 @@ Compass strip — now shows numeric degree labels every 10° (10, 20, 30…) alo
 
   Sky / ground — slightly richer deep-blue sky gradient, warmer brown ground gradient to look more
   like the MP horizon.
+
+
+  // params error solved :
+
+   Status: All Errors Fixed, All Features Implemented
+  
+  Error 1 Fixed: ReferenceError: Cannot access 'paramMeta' before initialization
+
+  Root cause: paramMeta was declared on line 24 but referenced inside a Zustand selector on line 9
+  — a JavaScript Temporal Dead Zone violation (const is not accessible before its declaration
+  line).
+
+  Fix: Moved paramMeta and favorites useState declarations to the top of the component, before any
+  hooks that use them.
+
+  ---
+  Error 2 Fixed: Warning: The result of getSnapshot should be cached
+
+  Root cause: Two separate issues:
+  1. The selector (state) => selectGroupedParameters(state, paramMeta, favorites) was an inline 
+  closure that created a new array on every call. Zustand v5 uses React's useSyncExternalStore
+  which requires a stable snapshot — a new array each render causes an infinite re-render loop.
+  2. selectParameterSyncState returns { ... } — a new object literal on every call, same
+  infinite-loop risk.
+  
+  Fix: Three-part solution:
+  - Created a stable module-level selectRawParameters selector (outside the component, so its
+  reference never changes)
+  - Computed paramEntriesRaw using useMemo in the component body, depending on rawParameters and
+  paramMeta
+  - Wrapped selectParameterSyncState with useShallow from zustand/react/shallow so the returned
+  object is shallow-compared instead of reference-compared
+
+  ---
+  Features Implemented
+
+  ┌────────────────────────────────────────────────┬───────────────────────────────────────────┐
+  │                    Feature                     │                  Status                   │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ .param upload → auto-apply to FC via PARAM_SET │ ✅ Working                                │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ .param download from vehicle                   │ ✅ Fixed URL (export/param)               │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ JSON import/export                             │ ✅ Working                                │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Reset to Defaults                              │ ✅ Added — MAV_CMD_PREFLIGHT_STORAGE      │
+  │                                                │ (245, p1=2) with confirmation dialog      │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Parameter compare (vs vehicle / vs file A vs   │ ✅ Working                                │
+  │ B)                                             │                                           │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Favorites / pin parameters                     │ ✅ Working                                │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Search + category filter + sort                │ ✅ Working                                │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Sync status bar (received/reported/missing)    │ ✅ Working                                │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Flight mode documentation (all 14+ modes)      │ ✅ Added — expandable reference panel     │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Calibration explanations (accel, compass,      │ ✅ Added — expandable inline cards        │
+  │ level, ESC, gyro, radio, battery, motor)       │                                           │
+  ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ ARM/DISARM documentation                       │ ✅ Added                                  │
+  └────────────────────────────────────────────────┴───────────────────────────────────────────┘
