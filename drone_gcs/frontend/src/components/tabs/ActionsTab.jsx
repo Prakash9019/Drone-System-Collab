@@ -66,7 +66,7 @@ const ActionsTab = ({ vehicleState }) => {
     try {
       if (action.kind === 'shortcut') {
         const body = action.needsAlt ? { altitude_m: Number(takeoffAlt) } : {};
-        const res = await axios.post(`${API}/shortcuts/${action.name}`, body);
+        const res = await axios.post(`${API}/command/${action.name}`, body);
         const d = res.data;
         if (d.accepted === false) {
           showStatus(`✗ ${action.label}: ${d.mav_result_text || 'REJECTED'}`, false);

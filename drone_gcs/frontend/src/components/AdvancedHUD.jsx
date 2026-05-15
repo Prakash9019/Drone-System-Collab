@@ -60,12 +60,11 @@ function CompassStrip({ heading }) {
   );
 }
 
-// Roll arc indicator showing roll angle.
+// Roll arc indicator — matches MP's style with pointer triangle inside arc.
 function RollIndicator({ rollDeg }) {
-  const R = 60; // radius
+  const R = 58;
   const cx = 100;
-  const cy = 68;
-  // Arc from -60° to +60°, tick marks at ±10, ±20, ±30, ±45, ±60
+  const cy = 66;
   const arcTicks = [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60];
 
   const toXY = (angleDeg, r) => {
@@ -79,41 +78,47 @@ function RollIndicator({ rollDeg }) {
     return `M ${start.x} ${start.y} A ${R} ${R} 0 0 1 ${end.x} ${end.y}`;
   };
 
-  const indicatorPos = toXY(rollDeg, R);
-  const indicatorInner = toXY(rollDeg, R - 10);
+  // Fixed triangle at top (0°) pointing down into arc — this is the reference mark
+  const triTip = toXY(0, R - 2);
+  const triL   = toXY(-3, R + 8);
+  const triR   = toXY( 3, R + 8);
+
+  // Moving pointer — a small triangle that rotates with roll
+  const ptrTip = toXY(rollDeg, R + 2);
+  const ptrL   = toXY(rollDeg - 3, R + 11);
+  const ptrR   = toXY(rollDeg + 3, R + 11);
 
   return (
-    <svg width="200" height="80" className="hud2-roll-svg">
-      {/* Arc background */}
+    <svg width="200" height="78" className="hud2-roll-svg">
       <path d={arcPath()} className="hud2-roll-arc" />
-      {/* Tick marks */}
       {arcTicks.map((t) => {
         const outer = toXY(t, R);
-        const inner = toXY(t, R - (t % 30 === 0 ? 14 : 8));
+        const tickLen = t === 0 ? 15 : t % 30 === 0 ? 12 : t % 10 === 0 ? 8 : 5;
+        const inner = toXY(t, R - tickLen);
         return (
-          <line
-            key={t}
-            x1={outer.x} y1={outer.y}
-            x2={inner.x} y2={inner.y}
-            className={`hud2-roll-tick ${t === 0 ? 'zero' : ''}`}
-          />
+          <line key={t} x1={outer.x} y1={outer.y} x2={inner.x} y2={inner.y}
+            className={`hud2-roll-tick ${t === 0 ? 'zero' : ''}`} />
         );
       })}
-      {/* Roll indicator triangle */}
-      <line
-        x1={indicatorPos.x} y1={indicatorPos.y}
-        x2={indicatorInner.x} y2={indicatorInner.y}
-        className="hud2-roll-pointer"
+      {/* Fixed reference triangle at top */}
+      <polygon
+        points={`${triTip.x},${triTip.y} ${triL.x},${triL.y} ${triR.x},${triR.y}`}
+        fill="none" stroke="#ffffff" strokeWidth="1.5"
+      />
+      {/* Moving roll pointer triangle */}
+      <polygon
+        points={`${ptrTip.x},${ptrTip.y} ${ptrL.x},${ptrL.y} ${ptrR.x},${ptrR.y}`}
+        fill="#facc15" stroke="#facc15" strokeWidth="1"
       />
     </svg>
   );
 }
 
-// Pitch ladder rendered inside the artificial horizon.
+// Pitch ladder rendered inside the artificial horizon (MP style — 6px/deg).
 function PitchLadder({ pitchDeg, rollDeg }) {
-  const PX_PER_DEG = 5;
+  const PX_PER_DEG = 6;
   const pitchOffset = pitchDeg * PX_PER_DEG;
-  const lines = [-30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30];
+  const lines = [-45, -40, -35, -30, -25, -20, -15, -10, -5, 5, 10, 15, 20, 25, 30, 35, 40, 45];
 
   return (
     <div
@@ -124,15 +129,10 @@ function PitchLadder({ pitchDeg, rollDeg }) {
         className="hud2-horizon-translate"
         style={{ transform: `translateY(${pitchOffset}px)` }}
       >
-        {/* Sky */}
         <div className="hud2-sky" />
-        {/* Ground */}
         <div className="hud2-ground" />
-        {/* Horizon line */}
         <div className="hud2-horizon-line" />
-        {/* Pitch lines */}
         {lines.map((deg) => {
-          if (deg === 0) return null;
           const isMajor = deg % 10 === 0;
           const yOff = -deg * PX_PER_DEG;
           return (
@@ -246,61 +246,45 @@ function AltitudeTape({ altitude, climbRate }) {
   );
 }
 
-// Status chips at the bottom of the HUD.
-function StatusChips({ gpsfix, sats, hdop, ekfHealth, ekfFlags, isArmed, failsafe, mode, vibe, prearmText }) {
+// Status chips — matches MP's bottom status bar chip order.
+function StatusChips({ gpsfix, sats, hdop, ekfHealth, isArmed, failsafe, mode, vibe, prearmText }) {
   const gpsLabel = (() => {
-    if (gpsfix >= 6) return { text: 'RTK Fixed', color: '#22c55e' };
-    if (gpsfix >= 5) return { text: 'RTK Float', color: '#22c55e' };
-    if (gpsfix >= 4) return { text: 'DGPS', color: '#22c55e' };
-    if (gpsfix >= 3) return { text: `3D Fix ${sats}`, color: '#22c55e' };
+    if (gpsfix >= 6) return { text: `RTK Fixed ${sats}`, color: '#22c55e' };
+    if (gpsfix >= 5) return { text: `RTK Float ${sats}`, color: '#4ade80' };
+    if (gpsfix >= 4) return { text: `DGPS ${sats}`, color: '#4ade80' };
+    if (gpsfix >= 3) return { text: `3D Fix ${sats}`, color: '#4ade80' };
     if (gpsfix >= 2) return { text: `2D Fix ${sats}`, color: '#f59e0b' };
-    if (gpsfix >= 1) return { text: 'No Fix', color: '#ef4444' };
-    return { text: 'No GPS', color: '#ef4444' };
+    if (gpsfix >= 1) return { text: `No Fix ${sats}`, color: '#ef4444' };
+    return { text: 'No GPS', color: '#6b7280' };
   })();
 
-  const ekfColor = ekfHealth === 'BAD' ? '#ef4444' : ekfHealth === 'WARN' ? '#f59e0b' : '#22c55e';
-  const vibeHigh = (vibe?.vibration_x > 30 || vibe?.vibration_y > 30 || vibe?.vibration_z > 30);
+  const hdopColor = hdop < 1.5 ? '#4ade80' : hdop < 2.5 ? '#f59e0b' : '#ef4444';
+  const ekfColor  = ekfHealth === 'RED' ? '#ef4444' : ekfHealth === 'WARN' ? '#f59e0b' : '#4ade80';
+  const vibeHigh  = vibe?.vibration_x > 30 || vibe?.vibration_y > 30 || vibe?.vibration_z > 30;
 
   return (
     <div className="hud2-status-chips">
-      {/* GPS chip */}
-      <span className="hud2-chip" style={{ color: gpsLabel.color }}>
-        GPS: {gpsLabel.text}
+      <span className="hud2-chip" style={{ color: gpsLabel.color }}>GPS: {gpsLabel.text}</span>
+      {hdop > 0 && <span className="hud2-chip" style={{ color: hdopColor }}>HDOP: {Number(hdop).toFixed(1)}</span>}
+      <span className="hud2-chip" style={{ color: ekfColor }}>EKF: {ekfHealth}</span>
+      <span className="hud2-chip" style={{
+        color: isArmed ? '#ef4444' : '#4ade80', fontWeight: 700,
+        background: isArmed ? 'rgba(239,68,68,0.15)' : 'rgba(74,222,128,0.08)',
+        border: `1px solid ${isArmed ? 'rgba(239,68,68,0.4)' : 'rgba(74,222,128,0.2)'}`,
+      }}>
+        {isArmed ? 'ARMED' : 'DISARMED'}
       </span>
-      {hdop > 0 && (
-        <span className="hud2-chip" style={{ color: hdop < 1.5 ? '#22c55e' : hdop < 2.5 ? '#f59e0b' : '#ef4444' }}>
-          HDOP: {Number(hdop).toFixed(1)}
-        </span>
-      )}
-      {/* EKF chip */}
-      <span className="hud2-chip" style={{ color: ekfColor }}>
-        EKF: {ekfHealth}
-      </span>
-      {/* ARM status */}
-      <span className="hud2-chip" style={{ color: isArmed ? '#22c55e' : '#ef4444', fontWeight: 700 }}>
-        {isArmed ? '▶ ARMED' : '■ DISARMED'}
-      </span>
-      {/* Mode */}
-      {mode && (
-        <span className="hud2-chip" style={{ color: '#3b82f6' }}>
-          {mode}
-        </span>
-      )}
-      {/* Failsafe */}
+      {mode && <span className="hud2-chip" style={{ color: '#60a5fa' }}>{mode}</span>}
       {failsafe && (
-        <span className="hud2-chip hud2-chip-blink" style={{ color: '#ef4444', fontWeight: 700 }}>
-          ⚠ FAILSAFE
+        <span className="hud2-chip hud2-chip-blink" style={{ color: '#ef4444', background: 'rgba(239,68,68,0.2)', border: '1px solid #ef4444' }}>
+          FS!
         </span>
       )}
-      {/* VIBE warning */}
       {vibeHigh && (
-        <span className="hud2-chip hud2-chip-blink" style={{ color: '#f59e0b' }}>
-          ⚠ HIGH VIBE
-        </span>
+        <span className="hud2-chip hud2-chip-blink" style={{ color: '#f59e0b' }}>VIBE</span>
       )}
-      {/* Pre-arm message */}
       {prearmText && !isArmed && (
-        <span className="hud2-chip" style={{ color: '#f59e0b', fontSize: 10 }}>
+        <span className="hud2-chip" style={{ color: '#f59e0b', fontSize: 9, maxWidth: '100%' }}>
           {prearmText}
         </span>
       )}
@@ -399,26 +383,39 @@ const AdvancedHUD = ({ vehicleState, operational }) => {
         <div className="hud2-horizon-clip">
           <PitchLadder pitchDeg={pitchDeg} rollDeg={rollDeg} />
 
-          {/* Fixed aircraft symbol */}
+          {/* Aircraft reference symbol — MP crosshair style */}
           <div className="hud2-aircraft-symbol">
             <div className="hud2-wing hud2-wing-left" />
             <div className="hud2-fuselage" />
             <div className="hud2-wing hud2-wing-right" />
           </div>
+          {/* Centre vertical tick */}
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: 2, height: 14,
+            marginTop: 8,
+            background: '#facc15', zIndex: 21, pointerEvents: 'none',
+            boxShadow: '0 0 3px rgba(250,204,21,0.6)',
+          }} />
         </div>
 
         {/* Altitude tape (right) */}
         <AltitudeTape altitude={altitude} climbRate={climbRate} />
       </div>
 
-      {/* Battery bar */}
+      {/* Battery bar — MP style: voltage · amps · % · mAh */}
       <div className="hud2-battery-bar">
-        <span>
+        <span style={{ color: (() => {
+          const pct = v?.battery?.remaining ?? 100;
+          return pct < 15 ? '#f87171' : pct < 30 ? '#fbbf24' : '#94a3b8';
+        })() }}>
           Bat: {(v?.battery?.voltage ?? 0).toFixed(1)}V
           · {(v?.battery?.current ?? 0).toFixed(1)}A
           · {v?.battery?.remaining ?? 0}%
+          {v?.battery?.used_mah > 0 && ` · ${Math.round(v.battery.used_mah)}mAh`}
         </span>
-        {isDisconnected && <span style={{ color: '#ef4444', marginLeft: 8 }}>DISCONNECTED</span>}
+        {isDisconnected && <span style={{ color: '#ef4444', marginLeft: 8 }}>NO LINK</span>}
       </div>
 
       {/* Throttle bar */}

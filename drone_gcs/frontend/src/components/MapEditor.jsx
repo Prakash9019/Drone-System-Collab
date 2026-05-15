@@ -402,7 +402,7 @@ const MapEditor = () => {
                 Set guided target
               </div>
               <div onClick={() => runVehicle('RTL', () =>
-                axios.post(`${API_URL}/api/shortcuts/rtl`).then(r => r.data)
+                axios.post(`${API_URL}/api/command/rtl`).then(r => r.data)
               )}>
                 RTL (vehicle)
               </div>
