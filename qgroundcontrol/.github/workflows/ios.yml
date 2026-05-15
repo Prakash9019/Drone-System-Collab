@@ -1,0 +1,100 @@
+name: iOS
+
+on:
+  push:
+    branches:
+      - master
+      - 'Stable*'
+    tags:
+      - 'v*'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'deploy/ios/**'
+      - '.github/workflows/ios.yml'
+      - '.github/actions/qt-ios/**'
+      - '.github/actions/build-setup/**'
+      - '.github/actions/cmake-configure/**'
+      - '.github/actions/cmake-build/**'
+      - '.github/build-config.json'
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  actions: read
+  security-events: write
+
+env:
+  IS_STABLE_BUILD: ${{ (github.ref_type == 'tag' || contains(github.ref, 'Stable')) && 'true' || 'false' }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    strategy:
+      matrix:
+        build_type: [Release]
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      PACKAGE: QGroundControl
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
+
+      - name: Build Setup (iOS)
+        id: setup
+        uses: ./.github/actions/build-setup
+        with:
+          mode: ios
+          build-type: ${{ matrix.build_type }}
+          cpm-modules: ${{ runner.temp }}/build/cpm_modules
+
+      - name: Configure
+        uses: ./.github/actions/cmake-configure
+        with:
+          build-dir: ${{ runner.temp }}/build
+          build-type: ${{ matrix.build_type }}
+          stable: ${{ env.IS_STABLE_BUILD }}
+          # Qt6LinguistTools cmake config ships with the desktop qtbase install (host),
+          # not iOS qtbase; point CMake at the host copy directly.
+          extra-args: >-
+            -DQT_HOST_PATH=${{ env.QT_ROOT_DIR }}/../macos
+            -DQt6LinguistTools_DIR=${{ env.QT_ROOT_DIR }}/../macos/lib/cmake/Qt6LinguistTools
+
+      - name: Build
+        uses: ./.github/actions/cmake-build
+        with:
+          build-dir: ${{ runner.temp }}/build
+          build-type: ${{ matrix.build_type }}
+
+      - name: Attest and Upload
+        if: matrix.build_type == 'Release'
+        uses: ./.github/actions/attest-and-upload
+        with:
+          artifact-name: ${{ env.PACKAGE }}.app
+          package-name: ${{ env.PACKAGE }}
+          upload-aws: 'false'

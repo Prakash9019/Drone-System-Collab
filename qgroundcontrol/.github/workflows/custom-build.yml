@@ -1,0 +1,81 @@
+name: Custom Build
+
+on:
+  # Intentionally mirrors the paths-ignore filter used by the standard platform
+  # CI workflows (linux.yml, macos.yml, windows.yml). Mainline QGC source
+  # changes can break the custom build, so this workflow must run whenever
+  # those workflows run.
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Custom Plugin Build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Enable custom build
+        uses: ./.github/actions/custom-build
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/build-setup
+        with:
+          qt-host: linux
+          qt-arch: linux_gcc_64
+          build-type: Release
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Configure
+        uses: ./.github/actions/cmake-configure
+        with:
+          build-dir: ${{ runner.temp }}/build
+          build-type: Release
+
+      - name: Build
+        uses: ./.github/actions/cmake-build
+        with:
+          build-dir: ${{ runner.temp }}/build
+          build-type: Release
+
+      - name: Create AppImage
+        working-directory: ${{ runner.temp }}/build
+        run: cmake --install . --config Release
+
+      - name: Verify Custom AppImage
+        uses: ./.github/actions/verify-executable
+        with:
+          binary-path: Custom-QGroundControl-x86_64.AppImage
+          type: appimage
+          working-dir: ${{ runner.temp }}/build

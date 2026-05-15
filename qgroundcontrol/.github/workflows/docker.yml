@@ -1,0 +1,155 @@
+name: Docker
+
+on:
+  push:
+    branches:
+      - master
+      - 'Stable*'
+    tags:
+      - 'v*'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      linux: ${{ steps.detect-linux.outputs.any }}
+      android: ${{ steps.detect-android.outputs.any }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Detect Linux changes
+        id: detect-linux
+        uses: ./.github/actions/detect-changes
+        with:
+          platform: docker-linux
+      - name: Detect Android changes
+        id: detect-android
+        uses: ./.github/actions/detect-changes
+        with:
+          platform: docker-android
+
+  plan-builds:
+    name: Plan Docker Builds
+    runs-on: ubuntu-latest
+    needs: changes
+    if: always() && !cancelled()
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_jobs: ${{ steps.plan.outputs.has_jobs }}
+    steps:
+      - name: Checkout planner
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/plan_docker_builds.py
+            .github/scripts/ci_bootstrap.py
+            tools/common/gh_actions.py
+          sparse-checkout-cone-mode: false
+
+      - name: Plan matrix
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LINUX: ${{ needs.changes.outputs.linux }}
+          ANDROID: ${{ needs.changes.outputs.android }}
+        run: python3 "${GITHUB_WORKSPACE}/.github/scripts/plan_docker_builds.py"
+
+  build:
+    name: Docker ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    needs: [changes, plan-builds]
+    if: always() && !cancelled() && needs.plan-builds.outputs.has_jobs == 'true'
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-builds.outputs.matrix) }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Free Disk Space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: ${{ matrix.platform != 'Android' }}
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable
+          remove_packages_one_command: true
+          remove_folders: /usr/local/lib/docker/overlay2
+          rm_cmd: rmz
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Build with Docker
+        uses: ./.github/actions/docker
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          fuse: ${{ matrix.fuse }}
+          docker-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Find build artifact
+        id: artifact
+        run: >-
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/find_artifact.py"
+          --build-dir "${{ github.workspace }}/build"
+          --pattern "${{ matrix.artifact_pattern }}"
+
+      - name: Generate CPM dependency SBOM
+        if: steps.artifact.outputs.found == 'true'
+        run: >-
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/generate_cpm_sbom.py"
+          --build-dir "${{ github.workspace }}/build"
+          -o cpm-sbom.cdx.json
+
+      - name: Scan SBOM with Grype
+        if: steps.artifact.outputs.found == 'true'
+        id: grype
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        with:
+          sbom: cpm-sbom.cdx.json
+          fail-build: false
+          severity-cutoff: high
+          only-fixed: true
+          output-format: sarif
+
+      - name: Upload Grype results to GitHub Security
+        if: steps.artifact.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: 'grype-${{ matrix.platform }}'
