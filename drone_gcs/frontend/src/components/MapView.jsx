@@ -4,7 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
-import useMissionStore from '../store/useMissionStore';
+import useMissionStore, { FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION } from '../store/useMissionStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
 
 const API_URL = 'http://localhost:8080';
@@ -28,6 +28,7 @@ const MapView = () => {
   const trailRef = useRef([]);
   const otherVehicleMarkersRef = useRef(new Map());
   const adsbMarkersRef = useRef(new Map());
+  const rallyMarkersRef = useRef([]);
   const userPausedFollowRef = useRef(false);
   const programmaticMoveRef = useRef(false);
 
@@ -43,6 +44,9 @@ const MapView = () => {
   const insertWaypointAt = useMissionStore((s) => s.insertWaypointAt);
   const removeWaypoint = useMissionStore((s) => s.removeWaypoint);
   const selectedSeq = useMissionStore((s) => s.selectedSeq);
+  const waypoints = useMissionStore((s) => s.waypoints);
+  const _fenceSaved = useMissionStore((s) => s._fenceSaved);
+  const _rallySaved = useMissionStore((s) => s._rallySaved);
 
   const primaryMapKey = useMemo(() => {
     if (primarySysId != null && primarySysId !== '') return String(primarySysId);
@@ -55,6 +59,10 @@ const MapView = () => {
   const heading = useMemo(() => headingDegFromVehicle(vehicle), [vehicle]);
 
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, latLng: null });
+  const [mapStyleLoaded, setMapStyleLoaded] = useState(false);
+  const [showFenceOverlay, setShowFenceOverlay] = useState(true);
+  const [showMissionRoute, setShowMissionRoute] = useState(true);
+  const [showRallyOverlay, setShowRallyOverlay] = useState(true);
   const [mapBanner, setMapBanner] = useState('');
   const [geoNote, setGeoNote] = useState('');
   const [autoFollowVehicle, setAutoFollowVehicle] = useState(() => {
@@ -169,6 +177,28 @@ const MapView = () => {
           },
         });
       }
+
+      map.current.addSource('mv-fence-fill', {
+        type: 'geojson',
+        data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [] } }
+      });
+      map.current.addLayer({
+        id: 'mv-fence-fill', type: 'fill', source: 'mv-fence-fill',
+        paint: { 'fill-color': '#22c55e', 'fill-opacity': 0.18 }
+      });
+      map.current.addLayer({
+        id: 'mv-fence-outline', type: 'line', source: 'mv-fence-fill',
+        paint: { 'line-color': '#22c55e', 'line-width': 2, 'line-dasharray': [4, 2] }
+      });
+      map.current.addSource('mv-mission-route', {
+        type: 'geojson',
+        data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }
+      });
+      map.current.addLayer({
+        id: 'mv-mission-route', type: 'line', source: 'mv-mission-route',
+        paint: { 'line-color': '#3b82f6', 'line-width': 2, 'line-dasharray': [4, 2] }
+      });
+      setMapStyleLoaded(true);
     });
 
     map.current.on('contextmenu', (e) => {
@@ -353,6 +383,58 @@ const MapView = () => {
     }
   }, [adsbTracks]);
 
+  // ─── Fence overlay (Data tab) ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!map.current || !mapStyleLoaded) return;
+    const src = map.current.getSource('mv-fence-fill');
+    if (!src) return;
+    const verts = missionType === 'FENCE' ? waypoints : (_fenceSaved || []);
+    const coords = verts.map(wp => [wp.lng, wp.lat]);
+    const hasPolygon = showFenceOverlay && coords.length > 2;
+    src.setData({
+      type: 'Feature', properties: {},
+      geometry: { type: 'Polygon', coordinates: hasPolygon ? [[...coords, coords[0]]] : [] }
+    });
+    if (hasPolygon) {
+      const cmds = verts.map(w => Number(w.command));
+      const hasInc = cmds.some(c => c === FENCE_CMD_INCLUSION);
+      const hasExc = cmds.some(c => c === FENCE_CMD_EXCLUSION);
+      const color = hasExc && !hasInc ? '#ef4444' : hasExc && hasInc ? '#f97316' : '#22c55e';
+      if (map.current.getLayer('mv-fence-fill')) map.current.setPaintProperty('mv-fence-fill', 'fill-color', color);
+      if (map.current.getLayer('mv-fence-outline')) map.current.setPaintProperty('mv-fence-outline', 'line-color', color);
+    }
+  }, [waypoints, missionType, _fenceSaved, showFenceOverlay, mapStyleLoaded]);
+
+  // ─── Mission route overlay (Data tab) ────────────────────────────────────
+  useEffect(() => {
+    if (!map.current || !mapStyleLoaded) return;
+    const src = map.current.getSource('mv-mission-route');
+    if (!src) return;
+    const missionVerts = missionType === 'MISSION' ? waypoints : [];
+    const coords = missionVerts.filter(wp => wp.lat && wp.lng).map(wp => [wp.lng, wp.lat]);
+    src.setData({
+      type: 'Feature', properties: {},
+      geometry: { type: 'LineString', coordinates: showMissionRoute && coords.length > 1 ? coords : [] }
+    });
+  }, [waypoints, missionType, showMissionRoute, mapStyleLoaded]);
+
+  // ─── Rally point markers (Data tab) ──────────────────────────────────────
+  useEffect(() => {
+    if (!map.current || !mapStyleLoaded) return;
+    rallyMarkersRef.current.forEach(m => m.remove());
+    rallyMarkersRef.current = [];
+    if (!showRallyOverlay) return;
+    const verts = missionType === 'RALLY' ? waypoints : (_rallySaved || []);
+    verts.forEach((wp, i) => {
+      if (!wp.lat || !wp.lng) return;
+      const el = document.createElement('div');
+      el.className = 'mv-rally-marker';
+      el.title = `Rally ${i + 1}`;
+      const mk = new maplibregl.Marker({ element: el }).setLngLat([wp.lng, wp.lat]).addTo(map.current);
+      rallyMarkersRef.current.push(mk);
+    });
+  }, [waypoints, missionType, _rallySaved, showRallyOverlay, mapStyleLoaded]);
+
   const runMapApi = async (label, fn) => {
     setMapBanner('');
     try {
@@ -458,6 +540,18 @@ const MapView = () => {
             Resume follow
           </button>
         )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+          {[
+            ['Fence', showFenceOverlay, setShowFenceOverlay],
+            ['Mission', showMissionRoute, setShowMissionRoute],
+            ['Rally', showRallyOverlay, setShowRallyOverlay],
+          ].map(([label, checked, setter]) => (
+            <label key={label} style={{ fontSize: 10, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}>
+              <input type="checkbox" checked={checked} onChange={e => setter(e.target.checked)} />
+              {label}
+            </label>
+          ))}
+        </div>
         {geoNote && <div style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.3 }}>{geoNote}</div>}
         {mapBanner && <div style={{ fontSize: 11, color: '#fcd34d', lineHeight: 1.3 }}>{mapBanner}</div>}
       </div>

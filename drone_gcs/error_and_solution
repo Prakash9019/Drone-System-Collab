@@ -1,0 +1,192 @@
+Errors — Root Causes and Fixes Applied
+  
+  4 bugs found and fixed:
+
+  #: 1
+  Bug: GET /fence → 500, GET /mission → item_timeout
+  Root Cause: wait_for_message filtered MISSION_ITEM_INT by mission_type — older ArduPilot sends
+    type=0 even for FENCE items. Items 0-1 got through by chance, 2+ were silently dropped, retries
+
+    exhausted
+  Fix: Stop filtering MISSION_ITEM_INT/MISSION_ITEM by type at all; for other messages accept
+  type=0
+    as "unset"
+  ────────────────────────────────────────
+  #: 2
+  Bug: item_timeout after 2 items
+  Root Cause: Stale duplicate packets (AP retransmissions) consumed retry attempts — 5 attempts
+    spent draining old item-0/1 messages, none left for item-2
+  Fix: Inner drain loop: keep reading within the 2.5s window when seq doesn't match, no retry
+    consumed
+  ────────────────────────────────────────
+  #: 3
+  Bug: Any successful fence download → 500
+  Root Cause: MissionItem had no to_dict() method — return {"items": [item.to_dict() for item in 
+    items]} would throw AttributeError
+  Fix: Added to_dict() to MissionItem
+  ────────────────────────────────────────
+  #: 4
+  Bug: POST /fence/upload → ArduPilot rejects
+  Root Cause: Fence items sent with frame=3 (relative altitude). MP source confirms: all fence
+  items
+    must be frame=0 (MAV_FRAME_GLOBAL)
+  Fix: Changed buildMissionItemsForType to use frame: 0 for FENCE
+
+  Files changed: mission_manager.py, mission_models.py, FlightPlanner.jsx
+
+  ---
+  Setup Tab — What Each Feature Does
+
+  1. Accelerometer Calibration ✅ (Implemented, MP-aligned)
+
+  What it's for: The FC's accelerometer drifts from factory defaults over time, or the board isn't
+  mounted perfectly level. This re-teaches the FC what "level" feels like in all 6 orientations
+  (Level, Left, Right, Nose Down, Nose Up, Upside Down).
+
+  How MP does it: Sends PREFLIGHT_CALIBRATION with param5=1. The FC sends back
+  COMMAND_LONG(42429=ACCELCAL_VEHICLE_POS, param1=1..6) to tell the GCS which position to hold
+  next. GCS replies with the same command to confirm. Ends on STATUSTEXT containing "calibration
+  successful".
+
+  What we provide: Matches MP exactly. FC-driven position sequencing (not local counter), confirms
+  each position by sending ACCELCAL_VEHICLE_POS(42429) back, monitors STATUSTEXT for
+  completion/failure. Has the 6-position visual grid with active/done states.
+
+  Gap: None on the core protocol. MP also has a "Level only" button (param5=2) and "Simple accel"
+  button (param5=4) — we only have the full 6-position cal.
+
+  ---
+  2. Compass Calibration ✅ (Implemented, MP-aligned)
+  
+  What it's for: Compensates for magnetic interference from the drone's electronics and motors on
+  the compass readings. Must be done outdoors away from metal objects.
+
+  How MP does it: Sends DO_START_MAG_CAL (42424) with param2=1 (retry on fail), param3=1 (autosave
+  offsets to flash). Monitors MAG_CAL_PROGRESS and MAG_CAL_REPORT messages per compass ID. Cancel
+  sends DO_CANCEL_MAG_CAL (42426). Requires reboot after success to apply new offsets.
+
+  What we provide: Matches MP exactly. Sends DO_START_MAG_CAL with retry+autosave flags, groups
+  progress by compass ID, shows per-compass progress bars and fitness score, cancel sends
+  DO_CANCEL_MAG_CAL, and shows a reboot prompt on completion.
+
+  Gap: None critical.
+
+  ---
+  3. Motor Test ✅ (Implemented)
+  
+  What it's for: Spins individual motors to verify correct rotation direction and ESC response
+  before flight. Also tests that motor numbering matches ArduPilot's expected layout.
+
+  How MP does it: Sends DO_MOTOR_TEST (209) with param1=motor_number (1-based), param2=0 (throttle
+  type = percent), param3=throttle_pct, param4=duration_s. Motor 0 = stop all.
+
+  What we provide: Sends DO_MOTOR_TEST per motor (1-8), configurable throttle (5-30%) and duration.
+   Stop-all bypasses command queue and fires raw zero-throttle commands directly to motors 1-8
+  (matching MP's stopMotors()). Throttle capped at 30% as a safety limit.
+
+  Gap: MP also has CompassMot (compass interference calibration) — a completely different feature
+  where you spin all motors at increasing throttle while the system records COMPASSMOT_STATUS
+  packets showing interference % vs. current. This is separate from motor test and we don't have
+  it. We could add a "CompassMot" sub-tab if needed.
+
+  ---
+  4. Battery Monitor ✅ (Partial — core implemented)
+  
+  What it's for: Tells the FC how to measure battery voltage and current — which pins the sensing
+  hardware is connected to, the voltage divider ratio, and amperes-per-volt scaling. Wrong
+  calibration → wrong voltage/current readings → bad failsafe triggering.
+
+  How MP does it: Reads/writes BATT_MONITOR, BATT_CAPACITY, BATT_VOLT_MULT, BATT_AMP_PERVLT,
+  BATT_VOLT_PIN, BATT_CURR_PIN. Has hardware board presets (Pixhawk/Cube/APM → auto-fills the right
+   pin numbers). Has sensor presets (Attopilot 45A/90A/180A, 3DR Power Module → auto-fills
+  VOLT_MULT and AMP_PERVLT). Has a "measured voltage calibration" wizard: enter your multimeter
+  reading → computes new multiplier.
+
+  What we provide: Reads/writes the core params (BATT_MONITOR, BATT_CAPACITY, BATT_VOLT_MULT,
+  BATT_AMP_PERVLT, BATT_VOLT_PIN, BATT_CURR_PIN) plus failsafe thresholds (BATT_LOW_VOLT,
+  BATT_CRT_VOLT, BATT_LOW_MAH). Shows live voltage/current/% from telemetry.
+
+  Gaps:
+  - No hardware board presets (Pixhawk/Cube → auto-fill pins)
+  - No sensor presets (Attopilot → auto-fill multipliers)
+  - No calibration wizard (enter multimeter reading → recalculate multiplier)
+  - No BATT2_* support (second battery entirely absent)
+
+  ---
+  5. Flight Modes ✅ (Partial — core implemented)
+  
+  What it's for: Maps the 6 positions of your RC mode switch to 6 flight modes (e.g. Stabilize,
+  AltHold, Loiter, Auto, RTL, Guided). The FC reads which mode to use from the RC PWM value on the
+  designated channel.
+
+  How MP does it: Reads FLTMODE1-6 params. Reads live PWM of the mode channel (FLTMODE_CH).
+  Highlights which dropdown is currently active based on PWM thresholds: <1230=slot0,
+  1231-1360=slot1, 1361-1490=slot2, 1491-1620=slot3, 1621-1749=slot4, ≥1750=slot5. Has Simple Mode
+  (SIMPLE bitmask) and Super-Simple Mode (SUPER_SIMPLE bitmask) checkboxes per slot.
+
+  What we provide: Reads/writes FLTMODE1-6, shows which mode is currently active as a "CURRENT"
+  badge matching the telemetry mode string.
+
+  Gaps:
+  - No live RC PWM readout showing which slot is actually selected by stick position
+  - No SIMPLE/SUPER_SIMPLE mode bitmask checkboxes per slot
+  - No RC channel selector (FLTMODE_CH param)
+
+  ---
+  6. Failsafe Config ✅ (Partial — core implemented)
+  
+  What it's for: Defines what the FC does if it loses RC signal (throttle failsafe), battery gets
+  critically low, or GCS telemetry link drops. Wrong settings → no failsafe action on signal loss,
+  or constant false triggers.
+
+  How MP does it: FS_THR_ENABLE + FS_THR_VALUE (PWM threshold — shows live ch3 PWM colored red if
+  below threshold). FS_BATT_ENABLE/BATT_FS_LOW_ACT, FS_BATT_VOLTAGE, FS_BATT_MAH, BATT_LOW_TIMER.
+  FS_GCS_ENABLE. Shows live armed status and GPS lock.
+
+  What we provide: FS_BATT_ENABLE, FS_BATT_VOLTAGE, FS_BATT_MAH, FS_RC_ENABLE, FS_GCS_ENABLE,
+  FS_EKF_ACTION, FS_EKF_THRESH, RTL_ALT, LAND_SPEED.
+
+  Gaps:
+  - FS_THR_VALUE is missing — this is the actual PWM threshold for RC loss detection (critical:
+  without it, the FC uses whatever was last set) 
+  - No live ch3 PWM vs threshold visual indicator
+  - No BATT_LOW_TIMER (hysteresis: how many seconds battery must be low before triggering)
+  - Firmware-aware param fallback missing (BATT_FS_LOW_ACT is the newer param, older firmware used
+  FS_BATT_ENABLE)
+
+  ---
+  7. Radio Calibration ✅ (Implemented)
+  
+  What it's for: Records the min/max PWM range of each RC channel as you move all sticks to
+  extremes. Without this, the FC doesn't know the full travel range of your transmitter and stick
+  inputs will be incorrectly scaled.
+
+  How MP does it: PREFLIGHT_CALIBRATION with param4=1. Monitors RC_CHANNELS messages, records live
+  min/max per channel as sticks move. Writes RC1_MIN, RC1_MAX, RC1_TRIM (and same for RC2-RC8) when
+   done.
+
+  What we provide: Same flow — sends PREFLIGHT_CALIBRATION(param4=1), polls RC_CHANNELS or
+  RC_CHANNELS_RAW for live PWM, records min/max per channel, shows a visual bar for each channel.
+  Writes trim/min/max params on completion.
+
+  Gap: None critical.
+
+  ---
+  Plan Tab — How MP Implements It vs. Ours
+  
+  Type selector (MISSION / FENCE / RALLY): MP stores three separate in-memory buffers (MAV.wps,
+  MAV.fencepoints, MAV.rallypoints). Switching type saves the current buffer and restores the
+  target buffer. We now match this exactly with _missionSaved/_fenceSaved/_rallySaved (just
+  implemented this session).
+
+  FENCE protocol: MP's modern path uses MAV_MISSION_TYPE_FENCE (what we use). Forces
+  frame=MAV_FRAME_GLOBAL (0) on all fence items before upload (we now do this too). param1 on each
+  vertex item = total vertex count of that polygon. No minimum vertex count enforcement — same as
+  ours.
+
+  Click-to-add: MP in fence mode hides the "Add" button and expects polygon drawing tool. We use
+  map click-to-add vertices, which works but is less constrained.
+
+  What MP has that we don't yet: Circle fence types (FENCE_CIRCLE_INCLUSION,
+  FENCE_CIRCLE_EXCLUSION), survey grid lawnmower generation, per-command parameter help text in the
+   waypoint table, spline waypoints.

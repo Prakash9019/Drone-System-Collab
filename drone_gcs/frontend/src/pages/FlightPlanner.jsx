@@ -122,6 +122,11 @@ const FlightPlanner = () => {
 
   const validationWarnings = useMemo(() => validateMission(waypoints, missionType), [waypoints, missionType]);
 
+  const fenceCounts = useMemo(() => ({
+    inc: waypoints.filter(w => Number(w.command) === FENCE_CMD_INCLUSION).length,
+    exc: waypoints.filter(w => Number(w.command) === FENCE_CMD_EXCLUSION).length,
+  }), [waypoints]);
+
   const surveySeed = useMemo(() => {
     if (surveyFromNav?.lat != null && surveyFromNav?.lng != null) {
       return { lat: surveyFromNav.lat, lng: surveyFromNav.lng };
@@ -174,7 +179,8 @@ const FlightPlanner = () => {
       return items.map((wp, idx) => {
         const c = Number(wp.command);
         const command = c === FENCE_CMD_INCLUSION || c === FENCE_CMD_EXCLUSION ? c : defaultCmd;
-        return { ...wp, seq: idx, frame: 3, command, param1: totalVertices, alt: 0 };
+        // ArduPilot requires MAV_FRAME_GLOBAL (0) for fence items, not relative (3)
+        return { ...wp, seq: idx, frame: 0, command, param1: totalVertices, alt: 0 };
       });
     }
     if (missionType === 'RALLY') {
@@ -421,7 +427,7 @@ const FlightPlanner = () => {
             <span>
               Fence: {fenceStatus?.enabled ? 'ENABLED' : (fenceEnabled ? 'ENABLED' : 'DISABLED')}
               {' '}| Action: {fenceStatus?.action ?? fenceAction}
-              {' '}| Vertices: {waypoints.length}
+              {' '}| Inc: {fenceCounts.inc} Exc: {fenceCounts.exc} ({waypoints.length} pts)
             </span>
           </span>
         )}

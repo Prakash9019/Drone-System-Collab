@@ -132,8 +132,13 @@ class MissionManager:
                 msg = await asyncio.wait_for(self.message_queue.get(), timeout=time_left)
                 if msg.get_type() in msg_types:
                     if expected_mission_type is not None and hasattr(msg, "mission_type"):
-                        if int(msg.mission_type) != int(expected_mission_type):
-                            continue
+                        mtype = int(msg.mission_type)
+                        # MISSION_ITEM_INT/MISSION_ITEM: never filter by mission_type — seq matching
+                        # handles disambiguation and older ArduPilot always sends type=0 here.
+                        # For all other messages: accept type=0 (unset by older AP) or exact match.
+                        if msg.get_type() not in ('MISSION_ITEM_INT', 'MISSION_ITEM'):
+                            if mtype != 0 and mtype != int(expected_mission_type):
+                                continue
                     return msg
             except asyncio.TimeoutError:
                 return None
@@ -394,18 +399,31 @@ class MissionManager:
             return []
 
         items = []
-        # 2. Download items — 5 retries at 2.5s each (matches MP getWPAsync: 5 retries × 2500ms)
+        # 2. Download items — 5 attempts, each with a 2.5s drain window.
+        # Within each attempt we drain stale-seq messages without consuming attempts,
+        # matching MP getWPAsync: 5 retries × 2500ms.
         for seq in range(count):
+            item_found = False
             for attempt in range(5):
                 if attempt > 0: retries += 1
                 mav.mission_request_int_send(sysid, compid, seq, mission_type_value)
-                item_msg = await self.wait_for_message(
-                    ['MISSION_ITEM_INT', 'MISSION_ITEM'], timeout=2.5, expected_mission_type=mission_type_value)
-                if item_msg and item_msg.seq == seq:
+                # Drain messages within the 2.5s window; wrong-seq messages don't use an attempt
+                attempt_deadline = asyncio.get_event_loop().time() + 2.5
+                while True:
+                    remaining = attempt_deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break  # genuine timeout on this attempt, go to next attempt
+                    item_msg = await self.wait_for_message(
+                        ['MISSION_ITEM_INT', 'MISSION_ITEM'], timeout=remaining,
+                        expected_mission_type=mission_type_value)
+                    if item_msg is None:
+                        break  # timeout, try next attempt
+                    if item_msg.seq != seq:
+                        continue  # stale message, keep draining within window
                     is_int = item_msg.get_type() == "MISSION_ITEM_INT"
                     raw_x = float(getattr(item_msg, "x", 0.0))
                     raw_y = float(getattr(item_msg, "y", 0.0))
-                    item = MissionItem(
+                    new_item = MissionItem(
                         seq=item_msg.seq,
                         frame=item_msg.frame,
                         command=item_msg.command,
@@ -415,18 +433,20 @@ class MissionManager:
                         param2=item_msg.param2,
                         param3=item_msg.param3,
                         param4=item_msg.param4,
-                        # MISSION_ITEM_INT encodes x/y in 1e7-scaled ints, while
-                        # MISSION_ITEM uses x/y as float degrees directly.
+                        # MISSION_ITEM_INT encodes x/y in 1e7-scaled ints;
+                        # MISSION_ITEM uses float degrees directly.
                         lat=(raw_x / 1e7) if is_int else raw_x,
                         lng=(raw_y / 1e7) if is_int else raw_y,
                         alt=item_msg.z
                     )
-                    # Handle duplicate packets by ensuring we don't append the same seq multiple times
                     if seq == len(items):
-                        items.append(item)
+                        items.append(new_item)
                     self._set_transfer(current=int(seq + 1), retries=retries)
+                    item_found = True
                     break
-            else:
+                if item_found:
+                    break
+            if not item_found:
                 logger.error(f"Mission download failed at seq {seq}.")
                 self._set_transfer(phase="FAILED", ok=False, current=int(seq), error="item_timeout", duration_s=time.time() - start_time, retries=retries)
                 self._commit_history()

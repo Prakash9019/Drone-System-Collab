@@ -14,6 +14,9 @@ class MissionItem(BaseModel):
     lng: float = 0.0
     alt: float = 0.0
 
+    def to_dict(self):
+        return self.model_dump()
+
 
 class MissionTransferRequest(BaseModel):
     items: list[MissionItem]

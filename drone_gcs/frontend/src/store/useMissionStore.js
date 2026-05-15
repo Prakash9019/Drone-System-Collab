@@ -12,13 +12,27 @@ const useMissionStore = create((set, get) => ({
   fencePolygonMode: 'INCLUSION',
   _undoStack: [],
   mapInstance: null,
+  _missionSaved: [],
+  _fenceSaved: [],
+  _rallySaved: [],
 
   setMapInstance: (map) => set({ mapInstance: map }),
 
   setWaypoints: (wps) => set({ waypoints: wps, selectedSeq: wps.length ? 0 : null, missionPlannedTotal: wps.length }),
   setMissionCurrentSeq: (seq) => set({ missionCurrentSeq: Number.isFinite(Number(seq)) ? Number(seq) : -1 }),
   setMissionPlannedTotal: (n) => set({ missionPlannedTotal: Math.max(0, Number(n) || 0) }),
-  setMissionType: (missionType) => set({ missionType }),
+  setMissionType: (missionType) => set((state) => {
+    const slotMap = { MISSION: '_missionSaved', FENCE: '_fenceSaved', RALLY: '_rallySaved' };
+    const currentSlot = slotMap[state.missionType];
+    const targetSlot = slotMap[missionType];
+    const savedWaypoints = state[targetSlot] || [];
+    return {
+      missionType,
+      [currentSlot]: state.waypoints,
+      waypoints: savedWaypoints,
+      selectedSeq: savedWaypoints.length ? 0 : null,
+    };
+  }),
   setFencePolygonMode: (mode) => set({ fencePolygonMode: mode }),
   selectWaypoint: (seq) => set({ selectedSeq: seq }),
 
@@ -186,6 +200,16 @@ const useMissionStore = create((set, get) => ({
       };
     }),
 }));
+
+// Keep per-type slots in sync with the active waypoints buffer as edits happen
+useMissionStore.subscribe((state, prev) => {
+  if (state.waypoints === prev.waypoints) return;
+  const slotMap = { MISSION: '_missionSaved', FENCE: '_fenceSaved', RALLY: '_rallySaved' };
+  const slotKey = slotMap[state.missionType];
+  if (slotKey && state[slotKey] !== state.waypoints) {
+    useMissionStore.setState({ [slotKey]: state.waypoints });
+  }
+});
 
 export { FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION };
 export { selectMapMissionOverlay } from '../telemetry/mapSelectors';

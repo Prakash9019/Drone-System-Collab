@@ -1902,6 +1902,18 @@ body {
   box-shadow: 0 1px 4px rgba(0,0,0,0.4);
 }
 
+/* Rally point marker (Data tab overlay) */
+.mv-rally-marker {
+  width: 18px;
+  height: 18px;
+  background: #f59e0b;
+  border: 2px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.55);
+  cursor: default;
+}
+
 /* Home position marker */
 .home-marker {
   font-size: 22px;

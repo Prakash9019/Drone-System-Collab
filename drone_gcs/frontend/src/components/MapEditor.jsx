@@ -127,6 +127,12 @@ const MapEditor = () => {
         source: 'fence-area',
         paint: { 'fill-color': '#22c55e', 'fill-opacity': 0.18 }
       });
+      map.current.addLayer({
+        id: 'fence-outline',
+        type: 'line',
+        source: 'fence-area',
+        paint: { 'line-color': '#22c55e', 'line-width': 2, 'line-dasharray': [3, 2] }
+      });
 
       // Vehicle position dot
       map.current.addSource('vehicle-dot', {
@@ -297,11 +303,14 @@ const MapEditor = () => {
       const fill = hasExc && !hasInc ? '#ef4444' : hasExc && hasInc ? '#f97316' : '#22c55e';
       const line = hasExc && !hasInc ? '#f87171' : hasExc && hasInc ? '#fb923c' : '#10b981';
       map.current.setPaintProperty('fence-fill', 'fill-color', fill);
+      if (map.current.getLayer('fence-outline')) map.current.setPaintProperty('fence-outline', 'line-color', line);
       if (map.current.getLayer('route')) map.current.setPaintProperty('route', 'line-color', line);
     } else if (map.current.getLayer('route')) {
       map.current.setPaintProperty('route', 'line-color', '#10b981');
       if (map.current.getLayer('fence-fill'))
         map.current.setPaintProperty('fence-fill', 'fill-color', '#22c55e');
+      if (map.current.getLayer('fence-outline'))
+        map.current.setPaintProperty('fence-outline', 'line-color', '#22c55e');
     }
 
   }, [waypoints, missionType, missionCurrentSeq, selectedSeq, selectedMarkerSeq, updateWaypointField, selectWaypoint]);
