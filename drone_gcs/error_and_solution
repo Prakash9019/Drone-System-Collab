@@ -325,3 +325,91 @@ Compass strip — now shows numeric degree labels every 10° (10, 20, 30…) alo
   ├────────────────────────────────────────────────┼───────────────────────────────────────────┤
   │ ARM/DISARM documentation                       │ ✅ Added                                  │
   └────────────────────────────────────────────────┴───────────────────────────────────────────┘
+
+
+  // blank page solved : 
+
+   Fixed MapEditor.jsx:87 by wrapping selectMapVehicle with useShallow from zustand/react/shallow.
+
+  Why this fixes it: selectMapVehicle (mapSelectors.js:11) builds a fresh { position, heading, 
+  home, isStale, ... } object on every call. Zustand v5 uses useSyncExternalStore, which compares
+  snapshots by reference — a new object every render means the snapshot is never "equal", React
+  keeps re-rendering, and you hit the warning followed by the Maximum update depth exceeded crash.
+  useShallow swaps in shallow-key equality, so the hook only re-renders when one of the field
+  values actually changes. Same pattern already used in Params.jsx:36.
+
+
+  // video error solved :
+
+  ## Setup
+
+⏺ End-to-end vertical slice landed. Summary of what's in
+  place and what's deferred.
+
+  Backend (drone_gcs/python_service/video_service/)
+  - settings.py — VideoSettings dataclass mirroring 15 of
+  QGC's facts (source enum, URLs, port, fit, low-latency,
+  timeout, etc.), JSON persistence, restart-trigger field
+  set.
+  - pipeline_factory.py — build_source_bin for RTSP /
+  UDP-H264 / UDP-H265 / TCP-MPEG-TS / UDP-MPEG-TS, knobs
+  ported verbatim from GstVideoReceiver.cc:_makeSource
+  (latency=25, do-rtcp, buffer-size=8 MiB, drop-on-latency,
+  retry=3, jitterbuffer do-lost).
+  - webrtc_sender.py — WebRTCPeer per browser. tee →
+  queue(leaky) → rtph264pay (config-interval=-1) → webrtcbin.
+   STUN configured.
+  - gst_video_receiver.py — pipeline orchestration, tee
+  pad-probe for liveness, asyncio watchdog mirroring
+  _watchdog, bus listener on GLib thread, lazy gi import so
+  absent GStreamer doesn't crash the GCS.
+  - video_manager.py — singleton, settings → restart, peer
+  attach/detach, watchdog-driven auto-restart.
+  
+  FastAPI (python_service/main.py): GET /video/state, GET|PUT
+   /video/settings, POST /video/start|stop, WS 
+  /ws/video/signaling (JSON SDP/ICE exchange). Shutdown
+  hooked into lifespan.
+
+  Node gateway (node_api/server.js): five proxies under
+  /api/video/*. WS signaling intentionally goes browser →
+  Python:8000 directly (the gateway doesn't have WS-proxy
+  infra and adding it would be churn).
+
+  Frontend
+  - utils/webrtcClient.js — VideoClient class, recvonly
+  transceiver, exponential-backoff reconnect.
+  - store/useVideoStore.js — Zustand store matching the
+  backend schema, axios calls to /api/video/*.
+  - components/video/VideoView.jsx — <video> element,
+  fit-mode mapping (object-fit), grid overlay, double-click
+  fullscreen, status bar (peers / encoding / buffer-age).
+  - components/video/VideoSettingsPanel.jsx — source
+  dropdown, conditional URL/port input, fit, low-latency,
+  grid, timeout, format.
+  - pages/Video.jsx + nav entry + route in App.jsx (/video).
+  - SETUP.md updated with the GStreamer install commands for
+  macOS and Debian/Ubuntu and the gst-inspect-1.0 webrtcbin
+  smoke-test.
+  - pages/Video.jsx + nav entry + route in App.jsx (/video).
+  - SETUP.md updated with the GStreamer install commands for
+  macOS and Debian/Ubuntu and the gst-inspect-1.0 webrtcbin
+  smoke-test.
+
+  Verified: every Python file passes ast.parse; the package
+  imports clean without gi (lazy guard works); node --check
+  server.js passes; esbuild parses every new JSX/JS file.
+
+  Deferred to follow-up sessions (per the plan): recording
+  with tee/valve+mux/filesink, SubtitleWriter SRT telemetry,
+  MAVLink CAMERA_INFORMATION/VIDEO_STREAM_INFORMATION
+  discovery and auto-stream, multi-stream/thermal, WebCodecs
+  fallback, hardware-decoder preference setting,
+  soak/packet-loss hardening (plan §13 done-criteria).
+
+  Test the slice: install GStreamer (commands in SETUP.md
+  §Prerequisites), restart the Python backend and Node
+  gateway, open /video in the browser, pick RTSP and paste a
+  known-good URL (e.g. rtsp://wowzaec2demo.streamlock.net/vod
+  /mp4:BigBuckBunny_115k.mp4) → Start. The status bar should
+  go signaling-open → checking → connected.

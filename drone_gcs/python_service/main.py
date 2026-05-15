@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time as _time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import FastAPI, BackgroundTasks, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import uvicorn
@@ -26,6 +26,7 @@ from log_analyzer import analyze_file, analysis_to_csv
 from parameter_metadata import get_metadata_map
 from connection_manager import list_serial_ports_detailed
 from param_format import parse_param_text, format_param_text, diff_param_dicts
+from video_service import get_video_manager
 
 class ReplayStartRequest(BaseModel):
     session_id: str
@@ -137,7 +138,11 @@ async def lifespan(app: FastAPI):
         telemetry_publisher.stop()
     if link_manager:
         await link_manager.close()
-        
+    try:
+        await get_video_manager().shutdown()
+    except Exception:
+        logger.exception("video manager shutdown failed")
+
     await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(lifespan=lifespan, title="Drone GCS Python Service")
@@ -1199,6 +1204,69 @@ async def osd_profile_delete(profile_id: str):
     if not osd_manager:
         raise HTTPException(status_code=500, detail="OSD manager not initialized")
     return osd_manager.delete_profile(profile_id)
+
+@app.get("/video/state")
+async def video_state():
+    return get_video_manager().state()
+
+
+@app.get("/video/settings")
+async def video_settings_get():
+    return get_video_manager().settings.to_dict()
+
+
+@app.put("/video/settings")
+async def video_settings_put(patch: dict):
+    return await get_video_manager().update_settings(patch)
+
+
+@app.post("/video/start")
+async def video_start():
+    return await get_video_manager().start()
+
+
+@app.post("/video/stop")
+async def video_stop():
+    return await get_video_manager().stop()
+
+
+@app.websocket("/ws/video/signaling")
+async def video_signaling(ws: WebSocket):
+    """WebRTC signaling: browser ⇄ webrtcbin.
+
+    Protocol (JSON over WS):
+      server → client: {"type":"offer","sdp":...}, {"type":"ice","candidate":{...}}
+      client → server: {"type":"answer","sdp":...}, {"type":"ice","candidate":{...}}
+    """
+    await ws.accept()
+    vm = get_video_manager()
+    peer = None
+
+    async def send(msg: dict) -> None:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            logger.debug("signaling send failed (peer likely closed)")
+
+    try:
+        peer = await vm.attach_peer(send)
+    except Exception as e:
+        await ws.send_json({"type": "error", "message": str(e)})
+        await ws.close()
+        return
+
+    try:
+        while True:
+            msg = await ws.receive_json()
+            await peer.on_client_message(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("signaling loop error")
+    finally:
+        if peer:
+            await vm.detach_peer(peer.peer_id)
+
 
 if __name__ == "__main__":
     # IMPORTANT for serial/Bluetooth reliability:

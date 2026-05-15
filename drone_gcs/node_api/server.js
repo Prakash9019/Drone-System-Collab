@@ -472,6 +472,55 @@ app.get('/api/adsb/traffic', async (req, res) => {
   }
 });
 
+// ─── Video subsystem proxies ─────────────────────────────────────────────
+// (The /ws/video/signaling WebSocket is intentionally NOT proxied here —
+//  the browser connects directly to the Python service for SDP/ICE.)
+app.get('/api/video/state', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/video/state`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch video state', details: err.message });
+  }
+});
+
+app.get('/api/video/settings', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/video/settings`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch video settings', details: err.message });
+  }
+});
+
+app.put('/api/video/settings', async (req, res) => {
+  try {
+    const response = await axios.put(`${PYTHON_API_URL}/video/settings`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to update video settings', details: err.response?.data || err.message });
+  }
+});
+
+app.post('/api/video/start', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/video/start`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start video', details: err.message });
+  }
+});
+
+app.post('/api/video/stop', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/video/stop`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop video', details: err.message });
+  }
+});
+
 app.get('/api/parameters/metadata', async (req, res) => {
   try {
     const response = await axios.get(`${PYTHON_API_URL}/parameters/metadata`);

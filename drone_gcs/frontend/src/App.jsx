@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
-import { Activity, Map, Monitor, Settings, PlaneTakeoff, CircleHelp } from 'lucide-react';
+import { Activity, Map, Monitor, Settings, PlaneTakeoff, CircleHelp, Video as VideoIcon } from 'lucide-react';
 import useTelemetryStore from './store/useTelemetryStore';
 import FlightData from './pages/FlightData';
 import FlightPlanner from './pages/FlightPlanner';
@@ -8,6 +8,7 @@ import Setup from './pages/Setup';
 import Simulation from './pages/Simulation';
 import OSDEditor from './pages/OSDEditor';
 import Help from './pages/Help';
+import Video from './pages/Video';
 import './index.css';
 
 function App() {
@@ -91,6 +92,10 @@ function App() {
               <Monitor size={20} />
               OSD
             </NavLink>
+            <NavLink to="/video" className={({isActive}) => isActive ? "nav-item active" : "nav-item"}>
+              <VideoIcon size={20} />
+              Video
+            </NavLink>
             <NavLink to="/help" className={({isActive}) => isActive ? "nav-item active" : "nav-item"}>
               <CircleHelp size={20} />
               Help
@@ -107,6 +112,7 @@ function App() {
             <Route path="/setup" element={<Setup />} />
             <Route path="/simulation" element={<Simulation />} />
             <Route path="/osd" element={<OSDEditor />} />
+            <Route path="/video" element={<Video />} />
             <Route path="/help" element={<Help />} />
           </Routes>
         </div>

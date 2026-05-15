@@ -13,6 +13,24 @@ You can either:
 - **Option A:** Connect directly to your drone via serial/Bluetooth (like MissionPlanner) — **no MAVProxy needed**
 - **Option B:** Use MAVProxy as a forwarding bridge
 
+### Optional: Video subsystem (GStreamer)
+
+The `/video` tab streams the drone's RTSP / UDP-RTP / TCP-MPEG-TS feed to the browser over WebRTC. It needs GStreamer ≥ 1.20 with the `webrtcbin` plugin **and** the Python bindings on the backend host.
+
+**macOS:**
+```bash
+brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav pygobject3
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt install -y gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly} \
+                    gstreamer1.0-libav python3-gi python3-gst-1.0 \
+                    gir1.2-gst-plugins-bad-1.0
+```
+
+**Verify:** `gst-inspect-1.0 webrtcbin` should print plugin details. If `webrtcbin` is missing, the `/video` tab will surface the error in its status banner — every other tab keeps working since the import is lazy.
+
 ---
 
 ## Setup
