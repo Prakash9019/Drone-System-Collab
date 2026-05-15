@@ -190,3 +190,46 @@ Errors — Root Causes and Fixes Applied
   What MP has that we don't yet: Circle fence types (FENCE_CIRCLE_INCLUSION,
   FENCE_CIRCLE_EXCLUSION), survey grid lawnmower generation, per-command parameter help text in the
    waypoint table, spline waypoints.
+
+
+
+// new feature implemented : 
+
+   Summary
+  
+  Critical Bug Fixed: Polygon Exclusion
+
+  Root cause: buildMissionItemsForType was setting param1 = totalVertices (total of ALL fence
+  items) for every vertex. ArduPilot uses param1 to know when a polygon is complete — so with mixed
+   inclusion+exclusion items all carrying the same total count, ArduPilot couldn't correctly
+  reconstruct the two separate polygons.
+
+  Fix (matches Mission Planner Fence.FenceToLocation() exactly): Consecutive vertices with the same
+   command type are grouped into one polygon. Each vertex now carries param1 = vertex count of its 
+  own polygon.
+
+  Files Changed
+
+  FlightPlanner.jsx:
+  - Added buildFencePolygonGroups() — groups contiguous same-type vertices into polygon objects
+  (mirrors Fence.LocationToFence() in MP)
+  - Added validateFence() — warns if any polygon has < 3 points, or exclusion exists without
+  inclusion
+  - Fixed buildMissionItemsForType — now groups by polygon and sets correct param1 per polygon
+  - Added fencePolygons memo — per-polygon display in status bar (e.g., Incl(4pts) + Excl(3pts))
+  - Validation warnings now also show for FENCE type
+  
+  MapEditor.jsx:
+  - fence-area source now emits a GeoJSON FeatureCollection instead of a single Polygon
+  - fence-fill and fence-outline use data-driven paint — inclusion=green, exclusion=red (no more
+  orange mixed color, no more setPaintProperty calls)
+  - Vertex markers colored by command type: green for 5001, red for 5002
+  - Added buildFenceGroups() helper
+  - Partial polygons (1-2 pts) render as dashed line preview
+
+  MapView.jsx:
+  - Same multi-polygon FeatureCollection fix for the Data tab fence overlay
+  - Data-driven colors match MapEditor
+  
+  GCS_DOCUMENTATION.md (new): Complete reference covering setup, architecture, all features,
+  internal logic, and a step-by-step testing guide matched to Mission Planner behavior.

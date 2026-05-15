@@ -69,8 +69,43 @@ function buildWaypointsFile(waypoints) {
   return lines.join('\n');
 }
 
-// ─── Mission validation ───────────────────────────────────────────────────────
+// Group consecutive fence vertices by command type into polygon objects (mirrors MP Fence.LocationToFence)
+function buildFencePolygonGroups(waypoints) {
+  const groups = [];
+  let current = null;
+  waypoints.forEach(wp => {
+    const cmd = Number(wp.command);
+    const validCmd = (cmd === FENCE_CMD_INCLUSION || cmd === FENCE_CMD_EXCLUSION) ? cmd : FENCE_CMD_INCLUSION;
+    if (!current || current.cmd !== validCmd) {
+      if (current) groups.push(current);
+      current = { cmd: validCmd, items: [] };
+    }
+    current.items.push({ ...wp, command: validCmd });
+  });
+  if (current) groups.push(current);
+  return groups;
+}
+
+// ─── Mission/fence validation ─────────────────────────────────────────────────
+function validateFence(waypoints) {
+  const warnings = [];
+  const groups = buildFencePolygonGroups(waypoints);
+  groups.forEach((g, i) => {
+    const typeName = g.cmd === FENCE_CMD_EXCLUSION ? 'exclusion' : 'inclusion';
+    if (g.items.length < 3) {
+      warnings.push(`Polygon ${i + 1} (${typeName}) has ${g.items.length} point(s) — minimum 3 required for a valid polygon`);
+    }
+  });
+  const hasInclusion = groups.some(g => g.cmd === FENCE_CMD_INCLUSION);
+  const hasExclusion = groups.some(g => g.cmd === FENCE_CMD_EXCLUSION);
+  if (hasExclusion && !hasInclusion) {
+    warnings.push('Exclusion zone defined without an inclusion zone — vehicle has no explicitly safe area');
+  }
+  return warnings;
+}
+
 function validateMission(waypoints, missionType) {
+  if (missionType === 'FENCE') return validateFence(waypoints);
   if (missionType !== 'MISSION') return [];
   const warnings = [];
   const cmds = waypoints.map(w => Number(w.command));
@@ -127,6 +162,12 @@ const FlightPlanner = () => {
     exc: waypoints.filter(w => Number(w.command) === FENCE_CMD_EXCLUSION).length,
   }), [waypoints]);
 
+  // Per-polygon breakdown for display — matches MP's polygon-object model
+  const fencePolygons = useMemo(() => {
+    if (missionType !== 'FENCE' || !waypoints.length) return [];
+    return buildFencePolygonGroups(waypoints);
+  }, [waypoints, missionType]);
+
   const surveySeed = useMemo(() => {
     if (surveyFromNav?.lat != null && surveyFromNav?.lng != null) {
       return { lat: surveyFromNav.lat, lng: surveyFromNav.lng };
@@ -174,14 +215,27 @@ const FlightPlanner = () => {
 
   const buildMissionItemsForType = (items) => {
     if (missionType === 'FENCE') {
-      const totalVertices = items.length;
+      // Group consecutive vertices by type — each polygon gets its own param1 count.
+      // This matches Mission Planner's Fence.FenceToLocation() where every vertex in a
+      // polygon carries param1 = total vertices in THAT polygon (not the total fence count).
       const defaultCmd = fencePolygonMode === 'EXCLUSION' ? FENCE_CMD_EXCLUSION : FENCE_CMD_INCLUSION;
-      return items.map((wp, idx) => {
-        const c = Number(wp.command);
-        const command = c === FENCE_CMD_INCLUSION || c === FENCE_CMD_EXCLUSION ? c : defaultCmd;
-        // ArduPilot requires MAV_FRAME_GLOBAL (0) for fence items, not relative (3)
-        return { ...wp, seq: idx, frame: 0, command, param1: totalVertices, alt: 0 };
+      const groups = buildFencePolygonGroups(
+        items.map(wp => ({ ...wp, command: (Number(wp.command) === FENCE_CMD_INCLUSION || Number(wp.command) === FENCE_CMD_EXCLUSION) ? wp.command : defaultCmd }))
+      );
+      const result = [];
+      groups.forEach(poly => {
+        poly.items.forEach(wp => {
+          result.push({
+            ...wp,
+            seq: result.length,
+            frame: 0,        // MAV_FRAME_GLOBAL — required by ArduPilot for fence items
+            command: poly.cmd,
+            param1: poly.items.length,  // total vertices in THIS polygon (not total fence vertices)
+            alt: 0,
+          });
+        });
       });
+      return result;
     }
     if (missionType === 'RALLY') {
       return items.map((wp, idx) => ({ ...wp, seq: idx, frame: 3, command: 5100 }));
@@ -400,8 +454,8 @@ const FlightPlanner = () => {
         <button className="btn-toolbar" onClick={handleZoomToFit} disabled={!waypoints.length} title="Zoom map to fit all waypoints">
           <ZoomIn size={16} /> Zoom Fit
         </button>
-        {validationWarnings.length > 0 && missionType === 'MISSION' && (
-          <button className="btn-toolbar" style={{ color: '#f59e0b', borderColor: '#f59e0b' }} onClick={() => setShowValidation(v => !v)} title="Mission validation warnings">
+        {validationWarnings.length > 0 && (missionType === 'MISSION' || missionType === 'FENCE') && (
+          <button className="btn-toolbar" style={{ color: '#f59e0b', borderColor: '#f59e0b' }} onClick={() => setShowValidation(v => !v)} title={`${missionType} validation warnings`}>
             <AlertTriangle size={16} /> {validationWarnings.length} Warning{validationWarnings.length > 1 ? 's' : ''}
           </button>
         )}
@@ -427,7 +481,14 @@ const FlightPlanner = () => {
             <span>
               Fence: {fenceStatus?.enabled ? 'ENABLED' : (fenceEnabled ? 'ENABLED' : 'DISABLED')}
               {' '}| Action: {fenceStatus?.action ?? fenceAction}
-              {' '}| Inc: {fenceCounts.inc} Exc: {fenceCounts.exc} ({waypoints.length} pts)
+              {' '}| {fencePolygons.length === 0
+                ? 'No polygons'
+                : fencePolygons.map((p, i) => {
+                    const label = p.cmd === FENCE_CMD_EXCLUSION ? 'Excl' : 'Incl';
+                    const warn = p.items.length < 3 ? '⚠' : '';
+                    return `${warn}${label}(${p.items.length}pts)`;
+                  }).join(' + ')
+              }
             </span>
           </span>
         )}

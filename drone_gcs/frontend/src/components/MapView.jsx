@@ -180,15 +180,23 @@ const MapView = () => {
 
       map.current.addSource('mv-fence-fill', {
         type: 'geojson',
-        data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [] } }
+        data: { type: 'FeatureCollection', features: [] }
       });
       map.current.addLayer({
         id: 'mv-fence-fill', type: 'fill', source: 'mv-fence-fill',
-        paint: { 'fill-color': '#22c55e', 'fill-opacity': 0.18 }
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {
+          'fill-color': ['match', ['get', 'fenceType'], 'exclusion', '#ef4444', '#22c55e'],
+          'fill-opacity': 0.18,
+        }
       });
       map.current.addLayer({
         id: 'mv-fence-outline', type: 'line', source: 'mv-fence-fill',
-        paint: { 'line-color': '#22c55e', 'line-width': 2, 'line-dasharray': [4, 2] }
+        paint: {
+          'line-color': ['match', ['get', 'fenceType'], 'exclusion', '#f87171', '#10b981'],
+          'line-width': 2,
+          'line-dasharray': [4, 2],
+        }
       });
       map.current.addSource('mv-mission-route', {
         type: 'geojson',
@@ -383,26 +391,35 @@ const MapView = () => {
     }
   }, [adsbTracks]);
 
-  // ─── Fence overlay (Data tab) ─────────────────────────────────────────────
+  // ─── Fence overlay (Data tab) — multi-polygon with per-type colors ─────────
   useEffect(() => {
     if (!map.current || !mapStyleLoaded) return;
     const src = map.current.getSource('mv-fence-fill');
     if (!src) return;
     const verts = missionType === 'FENCE' ? waypoints : (_fenceSaved || []);
-    const coords = verts.map(wp => [wp.lng, wp.lat]);
-    const hasPolygon = showFenceOverlay && coords.length > 2;
-    src.setData({
-      type: 'Feature', properties: {},
-      geometry: { type: 'Polygon', coordinates: hasPolygon ? [[...coords, coords[0]]] : [] }
-    });
-    if (hasPolygon) {
-      const cmds = verts.map(w => Number(w.command));
-      const hasInc = cmds.some(c => c === FENCE_CMD_INCLUSION);
-      const hasExc = cmds.some(c => c === FENCE_CMD_EXCLUSION);
-      const color = hasExc && !hasInc ? '#ef4444' : hasExc && hasInc ? '#f97316' : '#22c55e';
-      if (map.current.getLayer('mv-fence-fill')) map.current.setPaintProperty('mv-fence-fill', 'fill-color', color);
-      if (map.current.getLayer('mv-fence-outline')) map.current.setPaintProperty('mv-fence-outline', 'line-color', color);
+    if (!showFenceOverlay || verts.length === 0) {
+      src.setData({ type: 'FeatureCollection', features: [] });
+      return;
     }
+    // Build polygon groups matching MP Fence.LocationToFence grouping logic
+    const groups = [];
+    let current = null;
+    verts.forEach(wp => {
+      const type = Number(wp.command) === FENCE_CMD_EXCLUSION ? 'exclusion' : 'inclusion';
+      if (!current || current.type !== type) {
+        if (current) groups.push(current);
+        current = { type, coords: [] };
+      }
+      current.coords.push([wp.lng, wp.lat]);
+    });
+    if (current) groups.push(current);
+
+    const features = groups.flatMap(g => {
+      if (g.coords.length < 3) return [];
+      return [{ type: 'Feature', properties: { fenceType: g.type },
+        geometry: { type: 'Polygon', coordinates: [[...g.coords, g.coords[0]]] } }];
+    });
+    src.setData({ type: 'FeatureCollection', features });
   }, [waypoints, missionType, _fenceSaved, showFenceOverlay, mapStyleLoaded]);
 
   // ─── Mission route overlay (Data tab) ────────────────────────────────────

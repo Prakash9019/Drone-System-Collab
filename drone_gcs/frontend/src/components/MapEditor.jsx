@@ -26,6 +26,8 @@ function distM(lat1, lon1, lat2, lon2) {
 function markerColor(cmdNum, isCurrent) {
   if (isCurrent) return '#10b981';
   switch (Number(cmdNum)) {
+    case 5001: return '#22c55e'; // FENCE inclusion — green
+    case 5002: return '#ef4444'; // FENCE exclusion — red
     case 22: return '#f59e0b';   // TAKEOFF — amber
     case 21: return '#ef4444';   // LAND — red
     case 20: return '#f97316';   // RTL — orange
@@ -34,6 +36,22 @@ function markerColor(cmdNum, isCurrent) {
     case 206: case 203: return '#10b981'; // camera — green
     default: return '#3b82f6';   // waypoint — blue
   }
+}
+
+// Group consecutive fence vertices of the same type into polygon objects (matches MP Fence.LocationToFence)
+function buildFenceGroups(waypoints) {
+  const groups = [];
+  let current = null;
+  waypoints.forEach(wp => {
+    const type = Number(wp.command) === FENCE_CMD_EXCLUSION ? 'exclusion' : 'inclusion';
+    if (!current || current.type !== type) {
+      if (current) groups.push(current);
+      current = { type, coords: [] };
+    }
+    current.coords.push([wp.lng, wp.lat]);
+  });
+  if (current) groups.push(current);
+  return groups;
 }
 
 const MapEditor = () => {
@@ -119,19 +137,29 @@ const MapEditor = () => {
 
       map.current.addSource('fence-area', {
         type: 'geojson',
-        data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [] } }
+        data: { type: 'FeatureCollection', features: [] }
       });
+      // Polygon fill — only applies to closed polygon features (≥3 pts)
       map.current.addLayer({
         id: 'fence-fill',
         type: 'fill',
         source: 'fence-area',
-        paint: { 'fill-color': '#22c55e', 'fill-opacity': 0.18 }
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {
+          'fill-color': ['match', ['get', 'fenceType'], 'exclusion', '#ef4444', '#22c55e'],
+          'fill-opacity': 0.18,
+        }
       });
+      // Outline — applies to both Polygon outlines and partial LineString previews
       map.current.addLayer({
         id: 'fence-outline',
         type: 'line',
         source: 'fence-area',
-        paint: { 'line-color': '#22c55e', 'line-width': 2, 'line-dasharray': [3, 2] }
+        paint: {
+          'line-color': ['match', ['get', 'fenceType'], 'exclusion', '#f87171', '#10b981'],
+          'line-width': 2,
+          'line-dasharray': [3, 2],
+        }
       });
 
       // Vehicle position dot
@@ -273,44 +301,33 @@ const MapEditor = () => {
       distMarkers.current.push(dm);
     }
 
-    // Update route line
+    // Route line: mission/rally only — fence uses dedicated layers below
     if (map.current.getSource('route')) {
-      const routeCoords = missionType === 'FENCE' && coordinates.length > 2
-        ? [...coordinates, coordinates[0]]
-        : coordinates;
       map.current.getSource('route').setData({
         type: 'Feature', properties: {},
-        geometry: { type: 'LineString', coordinates: routeCoords }
+        geometry: { type: 'LineString', coordinates: missionType === 'FENCE' ? [] : coordinates }
       });
     }
 
-    // Fence fill polygon
+    // Fence: render each polygon group independently with per-type color (matches MP WPOverlay)
     if (map.current.getSource('fence-area')) {
-      map.current.getSource('fence-area').setData({
-        type: 'Feature', properties: {},
-        geometry: {
-          type: 'Polygon',
-          coordinates: missionType === 'FENCE' && coordinates.length > 2 ? [[...coordinates, coordinates[0]]] : []
-        }
-      });
-    }
-
-    // Fence colour logic
-    if (missionType === 'FENCE' && coordinates.length > 2 && map.current.getLayer('fence-fill')) {
-      const cmds = waypoints.map((w) => Number(w.command));
-      const hasInc = cmds.some((c) => c === FENCE_CMD_INCLUSION);
-      const hasExc = cmds.some((c) => c === FENCE_CMD_EXCLUSION);
-      const fill = hasExc && !hasInc ? '#ef4444' : hasExc && hasInc ? '#f97316' : '#22c55e';
-      const line = hasExc && !hasInc ? '#f87171' : hasExc && hasInc ? '#fb923c' : '#10b981';
-      map.current.setPaintProperty('fence-fill', 'fill-color', fill);
-      if (map.current.getLayer('fence-outline')) map.current.setPaintProperty('fence-outline', 'line-color', line);
-      if (map.current.getLayer('route')) map.current.setPaintProperty('route', 'line-color', line);
-    } else if (map.current.getLayer('route')) {
-      map.current.setPaintProperty('route', 'line-color', '#10b981');
-      if (map.current.getLayer('fence-fill'))
-        map.current.setPaintProperty('fence-fill', 'fill-color', '#22c55e');
-      if (map.current.getLayer('fence-outline'))
-        map.current.setPaintProperty('fence-outline', 'line-color', '#22c55e');
+      if (missionType === 'FENCE' && waypoints.length > 0) {
+        const fenceGroups = buildFenceGroups(waypoints);
+        const features = fenceGroups.flatMap(g => {
+          if (g.coords.length === 0) return [];
+          if (g.coords.length > 2) {
+            // Closed polygon (≥3 pts) — rendered with fill + outline
+            return [{ type: 'Feature', properties: { fenceType: g.type },
+              geometry: { type: 'Polygon', coordinates: [[...g.coords, g.coords[0]]] } }];
+          }
+          // Partial polygon (<3 pts) — rendered as dashed line preview only
+          return [{ type: 'Feature', properties: { fenceType: g.type },
+            geometry: { type: 'LineString', coordinates: g.coords } }];
+        });
+        map.current.getSource('fence-area').setData({ type: 'FeatureCollection', features });
+      } else {
+        map.current.getSource('fence-area').setData({ type: 'FeatureCollection', features: [] });
+      }
     }
 
   }, [waypoints, missionType, missionCurrentSeq, selectedSeq, selectedMarkerSeq, updateWaypointField, selectWaypoint]);
