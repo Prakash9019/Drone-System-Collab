@@ -29,6 +29,7 @@ const MapView = () => {
   const otherVehicleMarkersRef = useRef(new Map());
   const adsbMarkersRef = useRef(new Map());
   const rallyMarkersRef = useRef([]);
+  const waypointMarkersRef = useRef([]);
   const userPausedFollowRef = useRef(false);
   const programmaticMoveRef = useRef(false);
 
@@ -47,6 +48,7 @@ const MapView = () => {
   const waypoints = useMissionStore((s) => s.waypoints);
   const _fenceSaved = useMissionStore((s) => s._fenceSaved);
   const _rallySaved = useMissionStore((s) => s._rallySaved);
+  const _missionSaved = useMissionStore((s) => s._missionSaved);
 
   const primaryMapKey = useMemo(() => {
     if (primarySysId != null && primarySysId !== '') return String(primarySysId);
@@ -140,13 +142,16 @@ const MapView = () => {
     attachUserGestureHandlers();
 
     const el = document.createElement('div');
-    el.style.width = '30px';
-    el.style.height = '30px';
-    el.style.backgroundImage =
-      'url("data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'%233b82f6\' stroke=\'white\' stroke-width=\'2\'><path d=\'M12 2L22 20L12 17L2 20L12 2Z\'/></svg>")';
-    el.style.backgroundSize = 'contain';
+    el.style.cssText = 'width:34px;height:34px;background-size:contain;background-repeat:no-repeat;filter:drop-shadow(0 0 4px rgba(59,130,246,0.8));';
+    el.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(
+      '<svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg">' +
+      '<polygon points="17,1 31,32 17,25 3,32" fill="%233b82f6" stroke="%23ffffff" stroke-width="2.5" stroke-linejoin="round"/>' +
+      '<circle cx="17" cy="17" r="3" fill="%23ffffff" opacity="0.8"/>' +
+      '</svg>'
+    )}")`;
+    el.title = 'Vehicle';
 
-    marker.current = new maplibregl.Marker({ element: el, rotationAlignment: 'map' })
+    marker.current = new maplibregl.Marker({ element: el, rotationAlignment: 'map', anchor: 'center' })
       .setLngLat([initial.lng, initial.lat])
       .addTo(map.current);
 
@@ -422,18 +427,20 @@ const MapView = () => {
     src.setData({ type: 'FeatureCollection', features });
   }, [waypoints, missionType, _fenceSaved, showFenceOverlay, mapStyleLoaded]);
 
-  // ─── Mission route overlay (Data tab) ────────────────────────────────────
+  // ─── Mission route overlay (Data tab) — always shows from saved buffer ──────
   useEffect(() => {
     if (!map.current || !mapStyleLoaded) return;
     const src = map.current.getSource('mv-mission-route');
     if (!src) return;
-    const missionVerts = missionType === 'MISSION' ? waypoints : [];
-    const coords = missionVerts.filter(wp => wp.lat && wp.lng).map(wp => [wp.lng, wp.lat]);
+    // Show mission route regardless of active tab — use active waypoints when in MISSION mode,
+    // otherwise use the saved mission buffer (so switching to FENCE tab doesn't hide route)
+    const missionVerts = missionType === 'MISSION' ? waypoints : (_missionSaved || []);
+    const coords = missionVerts.filter(wp => wp.lat && wp.lng && !(wp.lat === 0 && wp.lng === 0)).map(wp => [wp.lng, wp.lat]);
     src.setData({
       type: 'Feature', properties: {},
       geometry: { type: 'LineString', coordinates: showMissionRoute && coords.length > 1 ? coords : [] }
     });
-  }, [waypoints, missionType, showMissionRoute, mapStyleLoaded]);
+  }, [waypoints, missionType, _missionSaved, showMissionRoute, mapStyleLoaded]);
 
   // ─── Rally point markers (Data tab) ──────────────────────────────────────
   useEffect(() => {
@@ -451,6 +458,45 @@ const MapView = () => {
       rallyMarkersRef.current.push(mk);
     });
   }, [waypoints, missionType, _rallySaved, showRallyOverlay, mapStyleLoaded]);
+
+  // ─── Mission waypoint markers with active-waypoint highlighting ──────────
+  useEffect(() => {
+    if (!map.current || !mapStyleLoaded) return;
+    waypointMarkersRef.current.forEach(m => m.remove());
+    waypointMarkersRef.current = [];
+    if (!showMissionRoute) return;
+
+    const missionVerts = missionType === 'MISSION' ? waypoints : (_missionSaved || []);
+    const activeSeq = Number(vehicle?.mission?.current_seq ?? -1);
+
+    missionVerts.forEach((wp) => {
+      if (!wp.lat || !wp.lng || (wp.lat === 0 && wp.lng === 0)) return;
+      const isActive = wp.seq === activeSeq && activeSeq >= 0;
+      const cmd = Number(wp.command);
+      const isTakeoff = cmd === 22;
+      const isLand = cmd === 21;
+      const isRtl = cmd === 20;
+      const bgColor = isActive ? '#22c55e' : isTakeoff ? '#f59e0b' : isLand || isRtl ? '#ef4444' : '#3b82f6';
+      const size = isActive ? 26 : 18;
+
+      const el = document.createElement('div');
+      el.style.cssText = [
+        `width:${size}px`, `height:${size}px`, `border-radius:50%`,
+        `background:${bgColor}`, `border:2px solid ${isActive ? '#fff' : 'rgba(255,255,255,0.7)'}`,
+        `display:flex`, `align-items:center`, `justify-content:center`,
+        `font-size:${isActive ? 10 : 9}px`, `font-weight:bold`, `color:#fff`,
+        `box-shadow:${isActive ? `0 0 0 4px rgba(34,197,94,0.35)` : '0 1px 4px rgba(0,0,0,0.5)'}`,
+        `transition:all 0.25s ease`, `cursor:default`,
+      ].join(';');
+      el.textContent = wp.seq;
+      el.title = `WP${wp.seq} cmd=${cmd} alt=${wp.alt}m${isActive ? ' ◀ ACTIVE' : ''}`;
+
+      const mk = new maplibregl.Marker({ element: el, anchor: 'center' })
+        .setLngLat([wp.lng, wp.lat])
+        .addTo(map.current);
+      waypointMarkersRef.current.push(mk);
+    });
+  }, [waypoints, missionType, _missionSaved, vehicle?.mission?.current_seq, showMissionRoute, mapStyleLoaded]);
 
   const runMapApi = async (label, fn) => {
     setMapBanner('');

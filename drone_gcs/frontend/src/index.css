@@ -956,32 +956,34 @@ body {
 .status-value { color: var(--text-primary); font-weight: 500; }
 
 /* ================================================================
-   HUD v2 — MISSION PLANNER PARITY
+   HUD v2 — MISSION PLANNER GLASS COCKPIT
 ================================================================ */
 .hud2 {
   width: 100%;
   height: 100%;
   position: relative;
-  background: #0a0e1a;
-  color: white;
+  background: #080c18;
+  color: #f8fafc;
   font-family: 'Courier New', monospace;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   user-select: none;
+  font-size: 11px;
 }
 
 .hud2-disconnected .hud2-horizon-area,
 .hud2-disconnected .hud2-compass-wrap,
 .hud2-disconnected .hud2-roll-wrap {
-  opacity: 0.35;
+  opacity: 0.3;
+  pointer-events: none;
 }
 
-/* ── Compass strip ────────────────────────────────────────────────── */
+/* ── Compass strip ─────────────────────────────────────────────── */
 .hud2-compass-wrap {
-  height: 30px;
-  background: #0d1117;
-  border-bottom: 1px solid #1e3a5f;
+  height: 36px;
+  background: linear-gradient(180deg, #060a14 0%, #0d1525 100%);
+  border-bottom: 1px solid #1e3050;
   position: relative;
   overflow: hidden;
   flex-shrink: 0;
@@ -990,103 +992,117 @@ body {
 .hud2-compass-inner {
   position: absolute;
   top: 0;
+  left: 0;
   height: 100%;
-  display: flex;
-  align-items: flex-end;
   transition: transform 0.08s linear;
   will-change: transform;
 }
 
+/* Minor tick (every 5°) */
 .hud2-compass-tick {
   position: absolute;
   bottom: 0;
   width: 1px;
-  height: 7px;
-  background: #2d4a6e;
+  height: 6px;
+  background: #263650;
 }
 
+/* Major tick (every 10°) */
 .hud2-compass-tick.major {
-  height: 14px;
-  background: #60a5fa;
+  height: 13px;
   width: 1.5px;
+  background: #4a7ab5;
 }
 
+/* Cardinal tick (N/NE/E/SE/S/SW/W/NW) — more prominent */
+.hud2-compass-tick.cardinal {
+  height: 15px;
+  width: 2px;
+  background: #fde68a;
+}
+
+/* Numeric label (every 10°) */
 .hud2-compass-label {
   position: absolute;
   bottom: 15px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 9px;
-  color: #93c5fd;
+  color: #7ba8d4;
   white-space: nowrap;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  font-weight: 600;
+  line-height: 1;
 }
 
+/* Cardinal label (N, NE, E…) — yellow like MP */
+.hud2-compass-label.cardinal {
+  color: #fde68a;
+  font-weight: 800;
+  font-size: 10px;
+}
+
+/* Fixed downward triangle at centre */
 .hud2-compass-pointer {
   position: absolute;
-  top: 2px;
+  top: 1px;
   left: 50%;
   transform: translateX(-50%);
   width: 0;
   height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 10px solid #f87171;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 9px solid #f87171;
+  z-index: 5;
 }
 
+/* Digital heading box, right-aligned */
 .hud2-compass-readout {
   position: absolute;
-  right: 8px;
+  right: 6px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 12px;
+  font-size: 13px;
   color: #f8fafc;
-  font-weight: 700;
-  letter-spacing: 1px;
-  background: rgba(0,0,0,0.5);
-  padding: 0 4px;
-  border-radius: 2px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  background: rgba(0,0,0,0.6);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid #1e3050;
 }
 
-/* ── Roll indicator SVG ──────────────────────────────────────────── */
+/* ── Roll indicator SVG ────────────────────────────────────────── */
 .hud2-roll-wrap {
   display: flex;
   justify-content: center;
-  height: 74px;
+  height: 72px;
   flex-shrink: 0;
   background: transparent;
-  margin-top: -4px;
+  margin-top: -6px;
   pointer-events: none;
   position: relative;
-  z-index: 5;
+  z-index: 6;
 }
 
 .hud2-roll-svg { overflow: visible; }
 
 .hud2-roll-arc {
   fill: none;
-  stroke: #374151;
+  stroke: #2d4060;
   stroke-width: 2;
 }
 
 .hud2-roll-tick {
-  stroke: #6b7280;
+  stroke: #4a5568;
   stroke-width: 1.5;
 }
 
 .hud2-roll-tick.zero {
-  stroke: #ffffff;
+  stroke: #e2e8f0;
   stroke-width: 2.5;
 }
 
-.hud2-roll-pointer {
-  stroke: #facc15;
-  stroke-width: 3;
-  stroke-linecap: round;
-}
-
-/* ── Main horizon area ───────────────────────────────────────────── */
+/* ── Main horizon area ─────────────────────────────────────────── */
 .hud2-horizon-area {
   flex: 1;
   display: flex;
@@ -1099,12 +1115,12 @@ body {
   flex: 1;
   position: relative;
   overflow: hidden;
-  background: #050810;
+  background: #04070f;
 }
 
 .hud2-horizon-rotate {
   position: absolute;
-  inset: -100px;
+  inset: -120px;
   transform-origin: center center;
   transition: transform 0.08s linear;
   will-change: transform;
@@ -1117,52 +1133,51 @@ body {
   will-change: transform;
 }
 
-/* MP sky: vibrant blue → lighter at horizon */
+/* Sky: rich deep blue → lighter at horizon */
 .hud2-sky {
   position: absolute;
   inset: 0 0 50% 0;
-  background: linear-gradient(to bottom, #0e3a74 0%, #1a5ca3 55%, #2e7dd6 100%);
+  background: linear-gradient(to bottom, #0a2f6e 0%, #1558a8 50%, #2878d0 100%);
 }
 
-/* MP ground: warm brown → darker lower */
+/* Ground: warm brown / olive → darker deeper */
 .hud2-ground {
   position: absolute;
   inset: 50% 0 0 0;
-  background: linear-gradient(to bottom, #7c4a15 0%, #5c3510 55%, #3d2208 100%);
+  background: linear-gradient(to bottom, #6b3e0e 0%, #4e2d09 50%, #2c1804 100%);
 }
 
 .hud2-horizon-line {
   position: absolute;
   top: 50%;
-  left: -20px;
-  right: -20px;
+  left: -30px;
+  right: -30px;
   height: 2px;
   background: #ffffff;
   transform: translateY(-50%);
   z-index: 5;
-  box-shadow: 0 0 3px rgba(255,255,255,0.5);
+  box-shadow: 0 0 4px rgba(255,255,255,0.4);
 }
 
-/* ── Pitch ladder ────────────────────────────────────────────────── */
+/* ── Pitch ladder ──────────────────────────────────────────────── */
 .hud2-pitch-line {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
   height: 0;
-  border-top: 1.5px solid rgba(255,255,255,0.8);
+  border-top: 1.5px solid rgba(255,255,255,0.75);
   z-index: 10;
 }
 
-/* Major lines: 100px wide, solid, with end tick marks via box-shadow */
 .hud2-pitch-line.major {
-  width: 110px;
-  border-color: rgba(255,255,255,0.95);
+  width: 108px;
+  border-color: rgba(255,255,255,0.92);
   border-width: 1.5px;
 }
 
 .hud2-pitch-line.minor {
-  width: 60px;
-  border-color: rgba(255,255,255,0.6);
+  width: 56px;
+  border-color: rgba(255,255,255,0.55);
   border-width: 1px;
 }
 
@@ -1170,71 +1185,68 @@ body {
   position: absolute;
   top: -9px;
   font-size: 10px;
-  color: white;
+  color: #f8fafc;
   font-weight: 700;
-  text-shadow: 1px 1px 2px rgba(0,0,0,0.9);
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.95);
 }
 
 .hud2-pitch-label.left  { right: calc(100% + 5px); }
 .hud2-pitch-label.right { left: calc(100% + 5px); }
 
-/* ── Aircraft reference symbol (MP style) ────────────────────────── */
-.hud2-aircraft-symbol {
+/* ── Aircraft reference symbol ─────────────────────────────────── */
+.hud2-aircraft-wrap {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  gap: 0;
-  z-index: 20;
+  z-index: 22;
   pointer-events: none;
+  filter: drop-shadow(0 0 5px rgba(250,204,21,0.55));
 }
 
-/* Wings: angled at outer edge like MP's crosshair */
-.hud2-wing {
-  width: 36px;
-  height: 3px;
-  background: #facc15;
-  box-shadow: 0 0 4px rgba(250,204,21,0.6);
+/* ── ARMED / DISARMED overlay ──────────────────────────────────── */
+.hud2-arm-overlay {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  z-index: 21;
+  pointer-events: none;
+  text-shadow: 0 1px 8px rgba(0,0,0,0.85), 0 0 20px rgba(0,0,0,0.6);
 }
 
-.hud2-wing-left  { border-radius: 3px 0 0 3px; }
-.hud2-wing-right { border-radius: 0 3px 3px 0; }
+.hud2-arm-overlay.disarmed { color: #f87171; }
+.hud2-arm-overlay.armed    { color: #4ade80; }
 
-.hud2-fuselage {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: transparent;
-  border: 2.5px solid #facc15;
-  box-shadow: 0 0 4px rgba(250,204,21,0.6);
+/* ── Failsafe overlay ──────────────────────────────────────────── */
+.hud2-failsafe-overlay {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  font-weight: 900;
+  color: #ef4444;
+  letter-spacing: 2px;
+  z-index: 23;
+  pointer-events: none;
+  animation: blink 0.7s ease-in-out infinite;
+  text-shadow: 0 0 10px rgba(239,68,68,0.7);
 }
 
-/* ── Speed & Altitude Tapes ──────────────────────────────────────── */
+/* ── Speed & Altitude Tapes ────────────────────────────────────── */
 .hud2-tape {
-  width: 58px;
+  width: 62px;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  background: rgba(5,8,20,0.75);
-  border: 1px solid #1e3a5f;
+  background: rgba(4,7,15,0.78);
+  border: 1px solid #1a2d4a;
   z-index: 10;
   flex-shrink: 0;
   position: relative;
-}
-
-.hud2-tape-label-top,
-.hud2-tape-label-bot {
-  font-size: 9px;
-  color: #60a5fa;
-  text-align: center;
-  padding: 3px 0;
-  background: rgba(0,0,0,0.8);
-  white-space: nowrap;
-  overflow: hidden;
-  font-weight: 700;
-  letter-spacing: 0.5px;
 }
 
 .hud2-tape-window {
@@ -1258,159 +1270,201 @@ body {
   left: 0;
   right: 0;
   height: 1px;
-  background: #1e3a5f;
+  background: #1a2d4a;
 }
 
 .hud2-tape-tick.labeled {
-  background: #2d5082;
   height: 1.5px;
+  background: #2d5080;
 }
 
+/* Right-side tape tick alignment */
+.hud2-tape-tick-r {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #1a2d4a;
+}
+
+.hud2-tape-tick-r.labeled {
+  height: 1.5px;
+  background: #2d5080;
+}
+
+/* Tick number — left tape (speed): number on right edge */
 .hud2-tape-num {
   position: absolute;
   right: 4px;
   top: -8px;
   font-size: 10px;
-  color: #cbd5e1;
-  font-family: 'Courier New', monospace;
+  color: #a0b4cc;
   font-weight: 600;
 }
 
-.hud2-tape-left .hud2-tape-num { right: auto; left: 4px; }
+/* Left tape ticks show number on LEFT side */
+.hud2-tape-left .hud2-tape-num {
+  right: auto;
+  left: 4px;
+}
 
-/* Current-value box: black box with yellow border (MP style) */
-.hud2-tape-value-box {
+/* Right tape tick number — right side */
+.hud2-tape-num-r {
+  position: absolute;
+  right: 4px;
+  top: -8px;
+  font-size: 10px;
+  color: #a0b4cc;
+  font-weight: 600;
+}
+
+/* Current-value box: black with yellow border (MP style) */
+.hud2-tape-valuebox {
   position: absolute;
   top: 50%;
-  left: 0;
-  right: 0;
+  left: 1px;
+  right: 1px;
   transform: translateY(-50%);
   background: #000000;
   border: 1.5px solid #facc15;
   color: #facc15;
   text-align: center;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 800;
   padding: 3px 0;
-  z-index: 5;
-  box-shadow: 0 0 6px rgba(250,204,21,0.3);
+  z-index: 6;
+  box-shadow: 0 0 8px rgba(250,204,21,0.25);
   font-family: 'Courier New', monospace;
   letter-spacing: 0.5px;
 }
 
-/* VSI bar */
-.hud2-vsi-container {
-  width: 8px;
+/* Alt tape value box — ticks show on right side */
+.hud2-tape-valuebox-r {
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  right: 1px;
+  transform: translateY(-50%);
+  background: #000000;
+  border: 1.5px solid #facc15;
+  color: #facc15;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 3px 0;
+  z-index: 6;
+  box-shadow: 0 0 8px rgba(250,204,21,0.25);
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.5px;
+}
+
+/* VSI bar — right edge of altitude tape */
+.hud2-vsi-wrap {
   position: absolute;
   right: 0;
   top: 0;
   bottom: 0;
-  background: rgba(0,0,0,0.4);
-  border-left: 1px solid #1e3a5f;
+  width: 5px;
+  background: rgba(0,0,0,0.5);
+  border-left: 1px solid #1a2d4a;
+  z-index: 7;
 }
 
-.hud2-vsi-bar {
+.hud2-vsi-fill {
   position: absolute;
   left: 0;
   right: 0;
   min-height: 2px;
-  transition: height 0.1s, background 0.3s;
+  transition: height 0.12s, background 0.2s;
 }
 
-.hud2-vsi-label {
-  position: absolute;
-  bottom: 2px;
-  left: -32px;
-  font-size: 8px;
-  color: #60a5fa;
-  white-space: nowrap;
-}
-
-/* ── Battery bar ─────────────────────────────────────────────────── */
-.hud2-battery-bar {
-  padding: 4px 8px;
-  font-size: 10px;
-  color: #94a3b8;
-  background: rgba(5,8,20,0.9);
-  border-top: 1px solid #1e3a5f;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 0;
-  font-family: 'Courier New', monospace;
-}
-
-/* ── Throttle bar ────────────────────────────────────────────────── */
-.hud2-throttle-wrap {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: rgba(5,8,20,0.9);
-  border-top: 1px solid #1e3a5f;
-  flex-shrink: 0;
-}
-
-.hud2-throttle-label {
+/* Tape footer — AS/GS or ALT/VSI labels */
+.hud2-tape-footer {
+  padding: 2px 4px;
   font-size: 9px;
   color: #60a5fa;
-  width: 22px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  background: rgba(0,0,0,0.85);
+  border-top: 1px solid #1a2d4a;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  line-height: 1.3;
+  flex-shrink: 0;
 }
 
-.hud2-throttle-track {
+/* ── Throttle row ──────────────────────────────────────────────── */
+.hud2-thr-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  background: rgba(4,7,15,0.92);
+  border-top: 1px solid #1a2d4a;
+  flex-shrink: 0;
+  height: 16px;
+}
+
+.hud2-thr-label {
+  font-size: 9px;
+  color: #60a5fa;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  width: 20px;
+  flex-shrink: 0;
+}
+
+.hud2-thr-track {
   flex: 1;
-  height: 7px;
+  height: 6px;
   background: #0f172a;
   border-radius: 2px;
   overflow: hidden;
-  border: 1px solid #1e3a5f;
+  border: 1px solid #1a2d4a;
 }
 
-.hud2-throttle-fill {
+.hud2-thr-fill {
   height: 100%;
   border-radius: 2px;
   transition: width 0.1s, background 0.2s;
 }
 
-.hud2-throttle-pct {
+.hud2-thr-pct {
   font-size: 9px;
   color: #94a3b8;
-  width: 28px;
+  width: 26px;
   text-align: right;
   font-family: 'Courier New', monospace;
-}
-
-/* ── Status chips ────────────────────────────────────────────────── */
-.hud2-status-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  padding: 4px 6px;
-  background: rgba(5,8,20,0.95);
-  border-top: 1px solid #1e3a5f;
   flex-shrink: 0;
 }
 
-.hud2-chip {
-  font-size: 9px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 2px;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.08);
+/* ── Bottom status bar — MP single-line format ─────────────────── */
+.hud2-statusbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 3px 8px;
+  background: rgba(4,7,15,0.96);
+  border-top: 1px solid #1a2d4a;
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 600;
   font-family: 'Courier New', monospace;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.hud2-sep {
+  color: #2d4a6e;
+  flex-shrink: 0;
 }
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.15; }
-}
-
-.hud2-chip-blink {
-  animation: blink 0.9s ease-in-out infinite;
 }
 
 /* ================================================================

@@ -7,7 +7,7 @@ import useMissionStore, {
   FENCE_CMD_INCLUSION,
   FENCE_CMD_EXCLUSION,
 } from '../store/useMissionStore';
-import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
+import useTelemetryStore, { selectPrimaryVehicle, selectMapVehicle } from '../store/useTelemetryStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
 
 const API_URL = 'http://localhost:8080';
@@ -54,6 +54,13 @@ function buildFenceGroups(waypoints) {
   return groups;
 }
 
+// Inline SVG for the drone arrow marker (triangle pointing north, rotates with heading)
+const DRONE_SVG_URL = `data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">' +
+  '<polygon points="16,1 30,30 16,24 2,30" fill="%233b82f6" stroke="%23ffffff" stroke-width="2" stroke-linejoin="round"/>' +
+  '</svg>'
+)}`;
+
 const MapEditor = () => {
   const navigate = useNavigate();
   const mapContainer = useRef(null);
@@ -61,6 +68,8 @@ const MapEditor = () => {
   const markers = useRef([]);
   const distMarkers = useRef([]);
   const homeMarkerRef = useRef(null);
+  const droneMarkerRef = useRef(null);
+  const [mapReady, setMapReady] = useState(false);
 
   const waypoints = useMissionStore((state) => state.waypoints);
   const missionType = useMissionStore((state) => state.missionType);
@@ -75,7 +84,7 @@ const MapEditor = () => {
   const setMapInstance = useMissionStore((state) => state.setMapInstance);
 
   const vehicleHome = useTelemetryStore(s => selectPrimaryVehicle(s)?.home);
-  const vehiclePos = useTelemetryStore(s => selectPrimaryVehicle(s)?.position);
+  const vehicleMapState = useTelemetryStore(s => selectMapVehicle(s));
 
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, lat: null, lng: null });
   const [selectedMarkerSeq, setSelectedMarkerSeq] = useState(null);
@@ -162,22 +171,7 @@ const MapEditor = () => {
         }
       });
 
-      // Vehicle position dot
-      map.current.addSource('vehicle-dot', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] }
-      });
-      map.current.addLayer({
-        id: 'vehicle-dot',
-        type: 'circle',
-        source: 'vehicle-dot',
-        paint: {
-          'circle-radius': 8,
-          'circle-color': '#22c55e',
-          'circle-stroke-width': 2,
-          'circle-stroke-color': '#fff',
-        }
-      });
+      setMapReady(true);
     });
 
     map.current.on('click', (e) => {
@@ -193,22 +187,33 @@ const MapEditor = () => {
     map.current.addControl(new maplibregl.NavigationControl(), 'top-right');
   }, [addWaypoint, missionType, setMapInstance]);
 
-  // ─── Vehicle position dot ─────────────────────────────────────────────────
+  // ─── Live drone marker (rotating arrow, matches heading) ─────────────────
   useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded()) return;
-    const src = map.current.getSource('vehicle-dot');
-    if (!src) return;
-    const lat = Number(vehiclePos?.lat);
-    const lng = Number(vehiclePos?.lng);
-    if (Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
-      src.setData({
-        type: 'FeatureCollection',
-        features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }]
-      });
+    if (!map.current || !mapReady) return;
+    const pos = vehicleMapState?.position;
+    const heading = vehicleMapState?.heading ?? 0;
+
+    if (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng)) {
+      if (!droneMarkerRef.current) {
+        const el = document.createElement('div');
+        el.style.cssText = `width:32px;height:32px;background-image:url('${DRONE_SVG_URL}');background-size:contain;background-repeat:no-repeat;`;
+        el.title = `Vehicle: ${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)}`;
+        droneMarkerRef.current = new maplibregl.Marker({
+          element: el,
+          rotationAlignment: 'map',
+          anchor: 'center',
+        }).setLngLat([pos.lng, pos.lat]).addTo(map.current);
+      } else {
+        droneMarkerRef.current.setLngLat([pos.lng, pos.lat]);
+      }
+      droneMarkerRef.current.setRotation(heading);
     } else {
-      src.setData({ type: 'FeatureCollection', features: [] });
+      if (droneMarkerRef.current) {
+        droneMarkerRef.current.remove();
+        droneMarkerRef.current = null;
+      }
     }
-  }, [vehiclePos?.lat, vehiclePos?.lng]);
+  }, [vehicleMapState, mapReady]);
 
   // ─── Home marker ──────────────────────────────────────────────────────────
   useEffect(() => {

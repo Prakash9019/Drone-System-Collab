@@ -233,3 +233,31 @@ Errors — Root Causes and Fixes Applied
   
   GCS_DOCUMENTATION.md (new): Complete reference covering setup, architecture, all features,
   internal logic, and a step-by-step testing guide matched to Mission Planner behavior.
+
+//solving Errors
+
+Compass strip — now shows numeric degree labels every 10° (10, 20, 30…) alongside the cardinals
+  (N, NE, E, SE, S, SW, W, NW). Cardinals are rendered in yellow (#fde68a) with taller tick marks
+  so they stand out at a glance, exactly like the MP strip. The strip is 3 copies wide so the N/0°
+  label never disappears at wrap. Strip height increased from 30 → 36 px.
+
+  Roll arc — degree labels (30, 45, 60) are now drawn in SVG text outside the arc on both sides.
+  Tick lengths scale with angle importance (0° = longest, ±10° = shortest).
+
+  Aircraft symbol — replaced the CSS div wings with an inline SVG gull-wing shape (inner horizontal
+   + outer angled-down segment + centre dot), all yellow with a drop-shadow glow. This matches the
+  MP yellow aircraft reference mark.
+
+  ARMED / DISARMED overlay — large (18 px, 900-weight, 3 px letter-spacing) text centred on the
+  upper horizon area. Red #f87171 when disarmed, green #4ade80 when armed. Heavy text-shadow makes
+  it readable against sky/ground.
+
+  Speed & altitude tapes — slightly wider (62 px), value box now has font-weight: 800. Both tapes
+  have a footer showing AS / GS (speed) or ALT / VSI (altitude) in the MP two-line format.
+
+  Bottom status bar — single MP-style line: Bat1: 12.60v 0.0A 100% | EKF | GPS: 3D Fix 8 | 
+  STABILIZE. Replaces the old wrapping chip grid. Keeps color coding (red/amber/green) for each
+  field.
+
+  Sky / ground — slightly richer deep-blue sky gradient, warmer brown ground gradient to look more
+  like the MP horizon.

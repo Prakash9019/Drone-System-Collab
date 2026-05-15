@@ -131,6 +131,7 @@ const FlightPlanner = () => {
   const clearMission = useMissionStore((state) => state.clearMission);
   const replaceWaypoints = useMissionStore((state) => state.replaceWaypoints);
   const appendWaypoints = useMissionStore((state) => state.appendWaypoints);
+  const insertWaypointAt = useMissionStore((state) => state.insertWaypointAt);
   const setMissionCurrentSeq = useMissionStore((state) => state.setMissionCurrentSeq);
   const missionPlannedTotal = useMissionStore((state) => state.missionPlannedTotal);
   const setMissionPlannedTotal = useMissionStore((state) => state.setMissionPlannedTotal);
@@ -408,7 +409,36 @@ const FlightPlanner = () => {
   }, [missionType, waypoints, vehicle?.position?.lat, vehicle?.position?.lng]);
 
   const inAutoMode = currentMode === 'AUTO' || currentMode.startsWith('AUTO ');
-  const canStartMission = !loading && waypoints.length > 0 && !!vehicle?.status?.armed && inAutoMode;
+
+  // ArduPilot AUTO mode REQUIRES TAKEOFF (cmd=22) as first mission item after HOME.
+  // Without it AUTO mode init fails with "Missing Takeoff Cmd".
+  const hasTakeoffCmd = useMemo(() =>
+    waypoints.some(w => Number(w.command) === 22),
+    [waypoints]
+  );
+
+  const insertTakeoffAtStart = () => {
+    // Insert TAKEOFF at position 0 with home coords and 10m altitude
+    const homeLat = Number(vehicle?.home?.lat || 0);
+    const homeLng = Number(vehicle?.home?.lng || 0);
+    insertWaypointAt(0, { command: 22, frame: 3, alt: 10, lat: homeLat, lng: homeLng });
+  };
+
+  // Pre-flight checklist for mission start
+  const preflightChecks = useMemo(() => {
+    if (missionType !== 'MISSION') return [];
+    return [
+      { label: 'Connected',    ok: !!vehicle?.status },
+      { label: 'GPS lock',     ok: Number(vehicle?.status?.gps_fix ?? 0) >= 3 },
+      { label: 'Home set',     ok: !!vehicle?.home?.valid },
+      { label: 'TAKEOFF cmd',  ok: hasTakeoffCmd },
+      { label: 'Waypoints',    ok: waypoints.length > 0 },
+      { label: 'Armed',        ok: !!vehicle?.status?.armed },
+      { label: 'AUTO mode',    ok: inAutoMode },
+    ];
+  }, [missionType, vehicle, hasTakeoffCmd, waypoints.length, inAutoMode]);
+
+  const canStartMission = !loading && waypoints.length > 0 && !!vehicle?.status?.armed && inAutoMode && hasTakeoffCmd;
 
   return (
     <div className="flight-planner">
@@ -519,19 +549,42 @@ const FlightPlanner = () => {
             WP: {missionSeq >= 0 ? missionSeq : '—'} / {Math.max((missionPlannedTotal || waypoints.length) - 1, 0)}
           </span>
           <span className="status-msg">Mode: {currentMode}</span>
-          <button className="btn-toolbar" onClick={() => setMode('AUTO')} disabled={loading}>Set AUTO</button>
+          {!hasTakeoffCmd && waypoints.length > 0 && (
+            <button
+              className="btn-toolbar"
+              style={{ background: 'rgba(239,68,68,0.15)', borderColor: '#ef4444', color: '#fca5a5' }}
+              onClick={insertTakeoffAtStart}
+              title="ArduPilot AUTO mode requires TAKEOFF as first mission item — click to auto-insert"
+            >
+              ⚠ Insert TAKEOFF
+            </button>
+          )}
           <button className="btn-toolbar" onClick={() => setMode('GUIDED')} disabled={loading}>Set GUIDED</button>
-          <button className="btn-toolbar primary" onClick={startMission} disabled={!canStartMission} title={!canStartMission ? 'Need: Armed + AUTO mode + waypoints' : 'Start mission'}>
+          <button className="btn-toolbar" onClick={() => setMode('AUTO')} disabled={loading}>Set AUTO</button>
+          <button
+            className="btn-toolbar primary"
+            onClick={startMission}
+            disabled={!canStartMission}
+            title={!canStartMission
+              ? preflightChecks.filter(c => !c.ok).map(c => `✗ ${c.label}`).join(', ')
+              : 'Start mission execution'}
+          >
             Start Mission
           </button>
-          <span className="status-msg" style={{ opacity: 0.75, fontSize: 11 }}>
-            Flow: Read → edit → Write → ARM → TAKEOFF → AUTO → Start
-          </span>
-          <span className="status-msg" style={{ opacity: 0.86 }}>
-            [{vehicle?.status?.armed ? '✓ ARMED' : '✗ NOT ARMED'}]
-            {' '}[{inAutoMode ? '✓ AUTO' : `✗ ${currentMode}`}]
-            {' '}[{waypoints.length > 0 ? `✓ ${waypoints.length} WPs` : '✗ NO MISSION'}]
-          </span>
+          {/* Pre-flight checklist */}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            {preflightChecks.map(c => (
+              <span key={c.label} style={{
+                fontSize: 10, padding: '2px 6px', borderRadius: 4,
+                background: c.ok ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)',
+                color: c.ok ? '#4ade80' : '#f87171',
+                border: `1px solid ${c.ok ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                fontWeight: 600,
+              }}>
+                {c.ok ? '✓' : '✗'} {c.label}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
