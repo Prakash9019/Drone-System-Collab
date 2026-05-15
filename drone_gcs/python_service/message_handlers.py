@@ -51,12 +51,32 @@ def handle_message(msg: any, state: VehicleState):
             state.status.mode = decode_mode(msg.custom_mode, msg.type)
         
     elif msg_type == 'SYS_STATUS':
-        state.battery.voltage = msg.voltage_battery / 1000.0  # mV to V
-        state.battery.current = msg.current_battery / 100.0   # cA to A
-        state.battery.remaining = msg.battery_remaining       # %
+        # Only use SYS_STATUS voltage as fallback; BATTERY_STATUS takes priority when available.
+        if not getattr(state.battery, '_has_battery_status', False):
+            state.battery.voltage = msg.voltage_battery / 1000.0  # mV to V
+            state.battery.current = msg.current_battery / 100.0   # cA to A
+            state.battery.remaining = msg.battery_remaining       # %
         state.status.sensors_present = int(msg.onboard_control_sensors_present)
         state.status.sensors_enabled = int(msg.onboard_control_sensors_enabled)
         state.status.sensors_health = int(msg.onboard_control_sensors_health)
+
+    elif msg_type == 'BATTERY_STATUS':
+        # Primary battery (id==0). Supports >65.5V via cell array summing.
+        if int(getattr(msg, 'id', 0)) == 0:
+            voltages = getattr(msg, 'voltages', [])
+            valid_cells = [v for v in voltages if v != 65535]
+            if valid_cells:
+                state.battery.voltage = sum(v / 1000.0 for v in valid_cells)
+            curr = getattr(msg, 'current_battery', -1)
+            if curr >= 0:
+                state.battery.current = curr / 100.0  # cA to A
+            rem = getattr(msg, 'battery_remaining', -1)
+            if rem >= 0:
+                state.battery.remaining = rem
+            used = getattr(msg, 'current_consumed', -1)
+            if used >= 0:
+                state.battery.used_mah = float(used)
+            state.battery._has_battery_status = True
         
     elif msg_type == 'GPS_RAW_INT':
         state.status.gps_fix = msg.fix_type

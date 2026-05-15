@@ -356,6 +356,24 @@ class LinkManager:
 
                         handle_message(msg, state)
 
+                        # MAG_CAL callback hook for calibration progress tracking
+                        if mtype in ('MAG_CAL_PROGRESS', 'MAG_CAL_REPORT'):
+                            if hasattr(self, '_mag_cal_cb') and callable(self._mag_cal_cb):
+                                try:
+                                    self._mag_cal_cb(mtype, msg)
+                                except Exception:
+                                    pass
+
+                        # Accel cal position request: ArduPilot sends COMMAND_LONG(42429) to GCS
+                        # indicating which physical position to hold for the next accel cal step.
+                        if mtype == 'COMMAND_LONG':
+                            accel_cmd = int(getattr(msg, 'command', 0))
+                            if accel_cmd == 42429 and hasattr(self, '_accel_cal_pos_cb') and callable(self._accel_cal_pos_cb):
+                                try:
+                                    self._accel_cal_pos_cb(int(getattr(msg, 'param1', 0)))
+                                except Exception:
+                                    pass
+
                         if mtype == 'HEARTBEAT' and sysid == self.primary_sysid:
                             self.last_heartbeat_time = time.time()
                             if self.connection_state in (ConnectionState.HEARTBEAT_LOST, ConnectionState.RECONNECTING):

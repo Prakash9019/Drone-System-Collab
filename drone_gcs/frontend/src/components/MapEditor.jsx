@@ -7,15 +7,43 @@ import useMissionStore, {
   FENCE_CMD_INCLUSION,
   FENCE_CMD_EXCLUSION,
 } from '../store/useMissionStore';
+import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
 
 const API_URL = 'http://localhost:8080';
+
+// Haversine distance in metres
+function distM(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toR = d => d * Math.PI / 180;
+  const dLat = toR(lat2 - lat1);
+  const dLon = toR(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Marker colour per MAVLink command
+function markerColor(cmdNum, isCurrent) {
+  if (isCurrent) return '#10b981';
+  switch (Number(cmdNum)) {
+    case 22: return '#f59e0b';   // TAKEOFF — amber
+    case 21: return '#ef4444';   // LAND — red
+    case 20: return '#f97316';   // RTL — orange
+    case 17: case 18: case 19: return '#8b5cf6'; // LOITER — purple
+    case 201: return '#0ea5e9';  // ROI — cyan
+    case 206: case 203: return '#10b981'; // camera — green
+    default: return '#3b82f6';   // waypoint — blue
+  }
+}
 
 const MapEditor = () => {
   const navigate = useNavigate();
   const mapContainer = useRef(null);
   const map = useRef(null);
   const markers = useRef([]);
+  const distMarkers = useRef([]);
+  const homeMarkerRef = useRef(null);
+
   const waypoints = useMissionStore((state) => state.waypoints);
   const missionType = useMissionStore((state) => state.missionType);
   const fencePolygonMode = useMissionStore((state) => state.fencePolygonMode);
@@ -26,10 +54,16 @@ const MapEditor = () => {
   const selectedSeq = useMissionStore((state) => state.selectedSeq);
   const missionCurrentSeq = useMissionStore((state) => state.missionCurrentSeq);
   const selectWaypoint = useMissionStore((state) => state.selectWaypoint);
+  const setMapInstance = useMissionStore((state) => state.setMapInstance);
+
+  const vehicleHome = useTelemetryStore(s => selectPrimaryVehicle(s)?.home);
+  const vehiclePos = useTelemetryStore(s => selectPrimaryVehicle(s)?.position);
+
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, lat: null, lng: null });
   const [selectedMarkerSeq, setSelectedMarkerSeq] = useState(null);
   const [plannerBanner, setPlannerBanner] = useState('');
 
+  // ─── Map init ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (map.current) return;
 
@@ -48,6 +82,8 @@ const MapEditor = () => {
       zoom,
       attributionControl: false,
     });
+
+    setMapInstance(map.current);
 
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -69,50 +105,43 @@ const MapEditor = () => {
     });
 
     map.current.on('load', () => {
-      // Add source for the path line
       map.current.addSource('route', {
         type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: []
-          }
-        }
+        data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }
       });
-
-      // Add layer to draw the line
       map.current.addLayer({
         id: 'route',
         type: 'line',
         source: 'route',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round'
-        },
-        paint: {
-          'line-color': '#10b981',
-          'line-width': 4,
-          'line-dasharray': [2, 2]
-        }
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#10b981', 'line-width': 4, 'line-dasharray': [2, 2] }
       });
 
       map.current.addSource('fence-area', {
         type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: { type: 'Polygon', coordinates: [] }
-        }
+        data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [] } }
       });
       map.current.addLayer({
         id: 'fence-fill',
         type: 'fill',
         source: 'fence-area',
+        paint: { 'fill-color': '#22c55e', 'fill-opacity': 0.18 }
+      });
+
+      // Vehicle position dot
+      map.current.addSource('vehicle-dot', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      map.current.addLayer({
+        id: 'vehicle-dot',
+        type: 'circle',
+        source: 'vehicle-dot',
         paint: {
-          'fill-color': '#22c55e',
-          'fill-opacity': 0.18
+          'circle-radius': 8,
+          'circle-color': '#22c55e',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#fff',
         }
       });
     });
@@ -124,36 +153,69 @@ const MapEditor = () => {
 
     map.current.on('contextmenu', (e) => {
       e.originalEvent.preventDefault();
-      setContextMenu({
-        visible: true,
-        x: e.point.x,
-        y: e.point.y,
-        lat: e.lngLat.lat,
-        lng: e.lngLat.lng,
-      });
+      setContextMenu({ visible: true, x: e.point.x, y: e.point.y, lat: e.lngLat.lat, lng: e.lngLat.lng });
     });
 
     map.current.addControl(new maplibregl.NavigationControl(), 'top-right');
-  }, [addWaypoint, missionType]);
+  }, [addWaypoint, missionType, setMapInstance]);
 
-  // Update map when waypoints change
+  // ─── Vehicle position dot ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    const src = map.current.getSource('vehicle-dot');
+    if (!src) return;
+    const lat = Number(vehiclePos?.lat);
+    const lng = Number(vehiclePos?.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
+      src.setData({
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }]
+      });
+    } else {
+      src.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, [vehiclePos?.lat, vehiclePos?.lng]);
+
+  // ─── Home marker ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!map.current) return;
+    if (homeMarkerRef.current) { homeMarkerRef.current.remove(); homeMarkerRef.current = null; }
+    const lat = Number(vehicleHome?.lat);
+    const lng = Number(vehicleHome?.lng);
+    if (vehicleHome?.valid && Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
+      const el = document.createElement('div');
+      el.className = 'home-marker';
+      el.title = `Home: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      el.innerHTML = '🏠';
+      homeMarkerRef.current = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+        .setLngLat([lng, lat])
+        .addTo(map.current);
+    }
+  }, [vehicleHome?.lat, vehicleHome?.lng, vehicleHome?.valid]);
+
+  // ─── Waypoint markers + route + distance labels ───────────────────────────
   useEffect(() => {
     if (!map.current) return;
 
-    // Clear old markers
     markers.current.forEach(m => m.remove());
     markers.current = [];
+    distMarkers.current.forEach(m => m.remove());
+    distMarkers.current = [];
 
     const coordinates = [];
 
     waypoints.forEach((wp, index) => {
       coordinates.push([wp.lng, wp.lat]);
 
-      // Create a marker for each waypoint
+      const cmdNum = Number(wp.command);
+      const isCurrent = missionCurrentSeq === wp.seq;
+      const isSelected = selectedSeq === wp.seq || selectedMarkerSeq === wp.seq;
+      const color = markerColor(cmdNum, isCurrent);
+
       const el = document.createElement('div');
       el.className = 'waypoint-marker';
       el.innerHTML = `<span>${index}</span>`;
-      el.style.backgroundColor = wp.seq === missionCurrentSeq ? '#10b981' : index === 0 ? '#f59e0b' : '#3b82f6';
+      el.style.backgroundColor = color;
       el.style.color = 'white';
       el.style.width = '24px';
       el.style.height = '24px';
@@ -163,47 +225,63 @@ const MapEditor = () => {
       el.style.justifyContent = 'center';
       el.style.fontSize = '12px';
       el.style.fontWeight = 'bold';
-      el.style.border = '2px solid white';
+      el.style.border = `2px solid ${isSelected ? '#fff' : 'rgba(255,255,255,0.6)'}`;
       el.style.cursor = 'pointer';
+      el.style.boxShadow = isSelected ? `0 0 0 3px ${color}` : 'none';
 
       const marker = new maplibregl.Marker(el, { draggable: true })
         .setLngLat([wp.lng, wp.lat])
         .addTo(map.current);
+
       marker.on('dragend', () => {
         const lngLat = marker.getLngLat();
         updateWaypointField(wp.seq, 'lat', lngLat.lat);
         updateWaypointField(wp.seq, 'lng', lngLat.lng);
       });
+
       el.onclick = (event) => {
         event.stopPropagation();
         selectWaypoint(wp.seq);
         setSelectedMarkerSeq(wp.seq);
       };
-      if (selectedSeq === wp.seq || selectedMarkerSeq === wp.seq || missionCurrentSeq === wp.seq) {
-        el.style.boxShadow = '0 0 0 3px rgba(16,185,129,0.9)';
-      }
-      
+
       markers.current.push(marker);
     });
 
-    // Update the line path
+    // Distance labels between consecutive waypoints
+    for (let i = 1; i < waypoints.length; i++) {
+      const a = waypoints[i - 1];
+      const b = waypoints[i];
+      if (!a.lat || !a.lng || !b.lat || !b.lng) continue;
+      const d = distM(a.lat, a.lng, b.lat, b.lng);
+      if (d < 1) continue;
+      const label = d >= 1000 ? `${(d / 1000).toFixed(1)}km` : `${Math.round(d)}m`;
+      const midLat = (a.lat + b.lat) / 2;
+      const midLng = (a.lng + b.lng) / 2;
+      const el = document.createElement('div');
+      el.className = 'wp-dist-label';
+      el.textContent = label;
+      const dm = new maplibregl.Marker({ element: el, anchor: 'center' })
+        .setLngLat([midLng, midLat])
+        .addTo(map.current);
+      distMarkers.current.push(dm);
+    }
+
+    // Update route line
     if (map.current.getSource('route')) {
       const routeCoords = missionType === 'FENCE' && coordinates.length > 2
         ? [...coordinates, coordinates[0]]
         : coordinates;
       map.current.getSource('route').setData({
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates: routeCoords
-        }
+        type: 'Feature', properties: {},
+        geometry: { type: 'LineString', coordinates: routeCoords }
       });
     }
+
+    // Fence fill polygon
     if (map.current.getSource('fence-area')) {
       map.current.getSource('fence-area').setData({
-        type: 'Feature',
-        properties: {},
+        type: 'Feature', properties: {},
         geometry: {
           type: 'Polygon',
           coordinates: missionType === 'FENCE' && coordinates.length > 2 ? [[...coordinates, coordinates[0]]] : []
@@ -211,34 +289,22 @@ const MapEditor = () => {
       });
     }
 
-    if (
-      missionType === 'FENCE' &&
-      coordinates.length > 2 &&
-      map.current.getLayer('fence-fill')
-    ) {
+    // Fence colour logic
+    if (missionType === 'FENCE' && coordinates.length > 2 && map.current.getLayer('fence-fill')) {
       const cmds = waypoints.map((w) => Number(w.command));
       const hasInc = cmds.some((c) => c === FENCE_CMD_INCLUSION);
       const hasExc = cmds.some((c) => c === FENCE_CMD_EXCLUSION);
-      let fill = '#22c55e';
-      let line = '#10b981';
-      if (hasExc && !hasInc) {
-        fill = '#ef4444';
-        line = '#f87171';
-      } else if (hasExc && hasInc) {
-        fill = '#f97316';
-        line = '#fb923c';
-      }
+      const fill = hasExc && !hasInc ? '#ef4444' : hasExc && hasInc ? '#f97316' : '#22c55e';
+      const line = hasExc && !hasInc ? '#f87171' : hasExc && hasInc ? '#fb923c' : '#10b981';
       map.current.setPaintProperty('fence-fill', 'fill-color', fill);
-      if (map.current.getLayer('route')) {
-        map.current.setPaintProperty('route', 'line-color', line);
-      }
+      if (map.current.getLayer('route')) map.current.setPaintProperty('route', 'line-color', line);
     } else if (map.current.getLayer('route')) {
       map.current.setPaintProperty('route', 'line-color', '#10b981');
       if (map.current.getLayer('fence-fill'))
         map.current.setPaintProperty('fence-fill', 'fill-color', '#22c55e');
     }
 
-  }, [waypoints, missionType, missionCurrentSeq, selectedSeq, selectedMarkerSeq]);
+  }, [waypoints, missionType, missionCurrentSeq, selectedSeq, selectedMarkerSeq, updateWaypointField, selectWaypoint]);
 
   const closeContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, lat: null, lng: null });
 
@@ -255,9 +321,7 @@ const MapEditor = () => {
 
   const fenceVertexCommand =
     missionType === 'FENCE'
-      ? fencePolygonMode === 'EXCLUSION'
-        ? FENCE_CMD_EXCLUSION
-        : FENCE_CMD_INCLUSION
+      ? (fencePolygonMode === 'EXCLUSION' ? FENCE_CMD_EXCLUSION : FENCE_CMD_INCLUSION)
       : 16;
 
   const insertHere = () => {
@@ -293,112 +357,68 @@ const MapEditor = () => {
       setPlannerBanner(`${label}: ${d?.detail || d?.error || e.message}`);
     }
     closeContextMenu();
+    setTimeout(() => setPlannerBanner(''), 5000);
   };
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       {plannerBanner && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 8,
-            left: 8,
-            zIndex: 120,
-            fontSize: 11,
-            color: '#fcd34d',
-            maxWidth: 280,
-            pointerEvents: 'none',
-          }}
-        >
+        <div className="map-banner">
           {plannerBanner}
         </div>
       )}
       <div ref={mapContainer} className="map-container" />
       {contextMenu.visible && (
         <div className="context-menu" style={{ position: 'absolute', top: contextMenu.y, left: contextMenu.x, zIndex: 110 }}>
-          <div onClick={insertHere}>{missionType === 'FENCE' ? 'Insert Fence Vertex' : 'Insert WP Here'}</div>
+          <div onClick={insertHere}>
+            {missionType === 'FENCE' ? 'Insert Fence Vertex' : 'Insert WP after selected'}
+          </div>
           {missionType === 'MISSION' && (
             <>
-              <div
-                onClick={() => {
-                  if (contextMenu.lat == null) return;
-                  insertWaypointAt(waypoints.length, {
-                    lat: contextMenu.lat,
-                    lng: contextMenu.lng,
-                    alt: 50,
-                    command: 16,
-                  });
-                  closeContextMenu();
-                }}
-              >
+              <div onClick={() => {
+                if (contextMenu.lat == null) return;
+                insertWaypointAt(waypoints.length, { lat: contextMenu.lat, lng: contextMenu.lng, alt: 50, command: 16 });
+                closeContextMenu();
+              }}>
                 Add waypoint at end
               </div>
-              <div
-                onClick={() =>
-                  runVehicle('Set home', () =>
-                    axios.post(`${API_URL}/api/vehicle/set_home`, {
-                      lat: contextMenu.lat,
-                      lng: contextMenu.lng,
-                      alt: 0,
-                    }).then((r) => r.data)
-                  )
-                }
-              >
+              <div onClick={() => runVehicle('Set home', () =>
+                axios.post(`${API_URL}/api/vehicle/set_home`, { lat: contextMenu.lat, lng: contextMenu.lng, alt: 0 }).then(r => r.data)
+              )}>
                 Set home here
               </div>
-              <div
-                onClick={() =>
-                  runVehicle('Guided target', () =>
-                    axios.post(`${API_URL}/api/flyto`, {
-                      lat: contextMenu.lat,
-                      lng: contextMenu.lng,
-                      alt: 50,
-                    }).then((r) => r.data)
-                  )
-                }
-              >
+              <div onClick={() => runVehicle('Guided target', () =>
+                axios.post(`${API_URL}/api/flyto`, { lat: contextMenu.lat, lng: contextMenu.lng, alt: 50 }).then(r => r.data)
+              )}>
                 Set guided target
               </div>
-              <div
-                onClick={() =>
-                  runVehicle('RTL', () => axios.post(`${API_URL}/api/command/rtl`).then((r) => r.data))
-                }
-              >
+              <div onClick={() => runVehicle('RTL', () =>
+                axios.post(`${API_URL}/api/shortcuts/rtl`).then(r => r.data)
+              )}>
                 RTL (vehicle)
               </div>
-              <div
-                onClick={() =>
-                  runVehicle('ROI', () =>
-                    axios.post(`${API_URL}/api/vehicle/roi`, {
-                      lat: contextMenu.lat,
-                      lng: contextMenu.lng,
-                      alt: 50,
-                    }).then((r) => r.data)
-                  )
-                }
-              >
+              <div onClick={() => runVehicle('ROI', () =>
+                axios.post(`${API_URL}/api/vehicle/roi`, { lat: contextMenu.lat, lng: contextMenu.lng, alt: 50 }).then(r => r.data)
+              )}>
                 Set ROI here
               </div>
-              <div
-                onClick={() => runVehicle('Clear ROI', () => axios.post(`${API_URL}/api/vehicle/roi/clear`).then((r) => r.data))}
-              >
+              <div onClick={() => runVehicle('Clear ROI', () =>
+                axios.post(`${API_URL}/api/vehicle/roi/clear`).then(r => r.data)
+              )}>
                 Clear ROI
               </div>
-              <div
-                onClick={() => {
-                  if (contextMenu.lat == null) return;
-                  navigate('/planner', {
-                    state: { openSurvey: true, centerLat: contextMenu.lat, centerLng: contextMenu.lng },
-                  });
-                  closeContextMenu();
-                }}
-              >
+              <div onClick={() => {
+                if (contextMenu.lat == null) return;
+                navigate('/planner', { state: { openSurvey: true, centerLat: contextMenu.lat, centerLng: contextMenu.lng } });
+                closeContextMenu();
+              }}>
                 Survey grid…
               </div>
             </>
           )}
           {missionType !== 'FENCE' && (
             <>
+              <div className="context-menu-sep" />
               <div onClick={() => addCommand(22)}>Insert TAKEOFF</div>
               <div onClick={() => addCommand(21)}>Insert LAND</div>
               <div onClick={() => addCommand(20)}>Insert RTL</div>
@@ -412,7 +432,8 @@ const MapEditor = () => {
               <div onClick={() => addCommand(206)}>Insert CAM_TRIGG_DIST</div>
             </>
           )}
-          <div onClick={deleteSelected}>Delete Selected</div>
+          <div className="context-menu-sep" />
+          <div className="context-menu-danger" onClick={deleteSelected}>Delete Selected WP</div>
           <div onClick={closeContextMenu}>Cancel</div>
         </div>
       )}

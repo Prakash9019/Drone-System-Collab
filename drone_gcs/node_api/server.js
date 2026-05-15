@@ -651,3 +651,128 @@ app.delete('/api/osd/profiles/:profileId', async (req, res) => {
     res.status(500).json({ error: 'Failed to delete OSD profile', details: err.message });
   }
 });
+
+// ─── Setup Tab Routes ─────────────────────────────────────────────────────────
+
+// Calibration status (STATUSTEXT + compass progress + accel requested pos)
+app.get('/api/calibration/status', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/calibration/status`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get calibration status', details: err.message });
+  }
+});
+
+// Accel cal step confirmation (sends MAV_CMD_ACCELCAL_VEHICLE_POS 42429 back to FC)
+app.post('/api/calibration/accel_confirm', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/calibration/accel_confirm`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Accel confirm failed', details: err.response?.data || err.message });
+  }
+});
+
+// Compass cancel (sends DO_CANCEL_MAG_CAL 42426 to FC)
+app.post('/api/calibration/compass_cancel', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/calibration/compass_cancel`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Compass cancel failed', details: err.response?.data || err.message });
+  }
+});
+
+// Motor test
+app.post('/api/motor_test', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/motor_test`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Motor test failed', details: err.response?.data || err.message });
+  }
+});
+
+// Flight modes
+app.get('/api/setup/flight_modes', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/setup/flight_modes`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get flight modes', details: err.message });
+  }
+});
+
+app.post('/api/setup/flight_modes', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/setup/flight_modes`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to set flight modes', details: err.response?.data || err.message });
+  }
+});
+
+// Failsafe
+app.get('/api/setup/failsafe', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/setup/failsafe`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get failsafe config', details: err.message });
+  }
+});
+
+app.post('/api/setup/failsafe', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/setup/failsafe`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to set failsafe config', details: err.response?.data || err.message });
+  }
+});
+
+// Battery monitor
+app.get('/api/setup/battery', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/setup/battery`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get battery config', details: err.message });
+  }
+});
+
+app.post('/api/setup/battery', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/setup/battery`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to set battery config', details: err.response?.data || err.message });
+  }
+});
+
+// Radio calibration
+app.get('/api/setup/radio', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/setup/radio`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get radio config', details: err.message });
+  }
+});
+
+app.post('/api/setup/radio', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/setup/radio`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to set radio config', details: err.response?.data || err.message });
+  }
+});

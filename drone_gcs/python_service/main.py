@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time as _time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
@@ -44,6 +45,38 @@ sitl_manager = None
 osd_manager = None
 preflight_manager = None
 
+# ─── Compass calibration progress (populated via MAG_CAL callback) ────────────
+_mag_cal_data: dict = {}
+
+def _mag_cal_callback(mtype: str, msg) -> None:
+    global _mag_cal_data
+    cid = int(getattr(msg, 'compass_id', 0))
+    if mtype == 'MAG_CAL_PROGRESS':
+        _mag_cal_data[cid] = {
+            'type': 'progress',
+            'pct': float(getattr(msg, 'completion_pct', 0)),
+            'cal_status': int(getattr(msg, 'cal_status', 0)),
+            'ts': _time.time(),
+        }
+    elif mtype == 'MAG_CAL_REPORT':
+        _mag_cal_data[cid] = {
+            'type': 'report',
+            'cal_status': int(getattr(msg, 'cal_status', 0)),
+            'fitness': float(getattr(msg, 'fitness', 0.0)),
+            'ofs_x': float(getattr(msg, 'ofs_x', 0)),
+            'ofs_y': float(getattr(msg, 'ofs_y', 0)),
+            'ofs_z': float(getattr(msg, 'ofs_z', 0)),
+            'autosaved': int(getattr(msg, 'autosaved', 0)),
+            'ts': _time.time(),
+        }
+
+# ─── Accel cal position tracking (populated when FC sends COMMAND_LONG 42429) ─
+_accel_cal_pos: int = 0  # 0=none, 1=Level, 2=Left, 3=Right, 4=NoseDown, 5=NoseUp, 6=Back
+
+def _accel_cal_pos_callback(pos: int) -> None:
+    global _accel_cal_pos
+    _accel_cal_pos = pos
+
 _sitl_bg_tasks: set[asyncio.Task] = set()
 _sitl_auto_connect_task: asyncio.Task | None = None
 
@@ -79,6 +112,10 @@ async def lifespan(app: FastAPI):
     sitl_manager = SITLManager()
     osd_manager = OSDProfileManager()
     preflight_manager = PreflightManager()
+    # Register MAG_CAL callback for compass calibration progress
+    link_manager._mag_cal_cb = _mag_cal_callback
+    # Register accel cal position callback (FC sends COMMAND_LONG 42429 to request each position)
+    link_manager._accel_cal_pos_cb = _accel_cal_pos_callback
     
     # Setup ZMQ Telemetry Publisher
     telemetry_publisher = TelemetryPublisher(port=5556, preflight_manager=preflight_manager)
@@ -711,13 +748,14 @@ async def run_calibration(req: CalibrationRequest):
     if not kind:
         raise HTTPException(status_code=400, detail="Calibration kind is required")
 
-    # MAV_CMD_PREFLIGHT_CALIBRATION = 241
-    # p5 accel, p6 compass, p7 level
+    # MAV_CMD_PREFLIGHT_CALIBRATION = 241: p5=accel, p7=level, p1=3 ESC
+    # MAV_CMD_DO_START_MAG_CAL = 42424: p1=0(all), p2=1(retry), p3=1(autosave)
     presets = {
-        "accelerometer": {"command": 241, "p5": 1},
-        "compass": {"command": 241, "p6": 1},
-        "level": {"command": 241, "p7": 1},
-        "esc": {"command": 241, "p1": 3},
+        "accelerometer": {"command": 241, "p5": 1.0},
+        "compass":       {"command": 42424, "p1": 0.0, "p2": 1.0, "p3": 1.0},
+        "level":         {"command": 241, "p7": 1.0},
+        "esc":           {"command": 241, "p1": 3.0},
+        "gyro":          {"command": 241, "p1": 1.0},
     }
     if kind == "reboot":
         payload = {"command": 246, "p1": 1}  # MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
@@ -739,6 +777,247 @@ async def run_calibration(req: CalibrationRequest):
         payload.get("p7", 0),
     )
     return {"status": "success" if out.get("accepted") else "failed", "kind": kind, **out}
+
+
+class AccelConfirmRequest(BaseModel):
+    position: int = 0  # FC-requested position: 1=Level 2=Left 3=Right 4=NoseDown 5=NoseUp 6=Back
+
+@app.post("/calibration/accel_confirm")
+async def accel_confirm(req: AccelConfirmRequest):
+    """Send ACCELCAL_VEHICLE_POS (42429) confirmation back to vehicle after user places drone."""
+    if not link_manager or not link_manager.primary_sysid:
+        raise HTTPException(status_code=500, detail="No vehicle connected")
+    global _accel_cal_pos
+    pos = req.position if req.position > 0 else _accel_cal_pos
+    out = await link_manager.send_command(
+        link_manager.primary_sysid,
+        link_manager.primary_compid,
+        42429,      # MAV_CMD_ACCELCAL_VEHICLE_POS
+        float(pos), # param1: position enum (1-6) matching what FC sent
+        retries=1,
+    )
+    return {"status": "ok" if out.get("accepted") else "sent", "position": pos, **out}
+
+
+@app.post("/calibration/compass_cancel")
+async def compass_cancel():
+    """Send DO_CANCEL_MAG_CAL (42426) to stop compass calibration on the vehicle."""
+    if not link_manager or not link_manager.primary_sysid:
+        raise HTTPException(status_code=500, detail="No vehicle connected")
+    global _mag_cal_data
+    _mag_cal_data.clear()
+    out = await link_manager.send_command(
+        link_manager.primary_sysid,
+        link_manager.primary_compid,
+        42426,  # MAV_CMD_DO_CANCEL_MAG_CAL
+        0.0,    # p1=0: cancel all compasses
+        retries=1,
+    )
+    return {"status": "cancelled", **out}
+
+
+# ─── Calibration status (STATUSTEXT + compass progress + accel pos) ──────────
+@app.get("/calibration/status")
+async def calibration_status_endpoint():
+    msgs = []
+    if link_manager and link_manager.primary_sysid:
+        vs = link_manager.vehicles.get(link_manager.primary_sysid)
+        if vs and hasattr(vs, 'status_messages'):
+            now = _time.time()
+            for m in vs.status_messages[-30:]:
+                try:
+                    msgs.append({
+                        'text': str(getattr(m, 'text', '')),
+                        'severity': int(getattr(m, 'severity', 6)),
+                        'ts': float(getattr(m, 'timestamp', now)),
+                    })
+                except Exception:
+                    pass
+    # Compass progress: filter stale entries (>30s)
+    now = _time.time()
+    compass = {k: v for k, v in _mag_cal_data.items() if now - v.get('ts', 0) < 30}
+    return {
+        "messages": msgs,
+        "compass_progress": compass,
+        "accel_requested_pos": _accel_cal_pos,  # 0=none, 1-6=position FC is requesting
+    }
+
+
+# ─── Motor test ───────────────────────────────────────────────────────────────
+class MotorTestRequest(BaseModel):
+    motor_number: int = 1   # 1-indexed; 0 = stop all motors
+    throttle_pct: float = 5.0
+    duration_s: float = 2.0
+
+@app.post("/motor_test")
+async def run_motor_test(req: MotorTestRequest):
+    if not link_manager or not link_manager.primary_sysid:
+        raise HTTPException(status_code=500, detail="No vehicle connected")
+    motor_num = int(req.motor_number)
+    throttle = max(0.0, min(30.0, float(req.throttle_pct)))  # hard cap at 30%
+    duration = max(0.0, min(10.0, float(req.duration_s)))
+
+    # motor_number == 0 → stop all: fire throttle=0, duration=0 to every motor 1-8
+    # Mirror MP's stopMotors() which sends N back-to-back commands in a tight loop.
+    if motor_num <= 0:
+        if link_manager.conn:
+            for m in range(1, 9):
+                try:
+                    link_manager.conn.mav.command_long_send(
+                        link_manager.primary_sysid,
+                        link_manager.primary_compid,
+                        209,        # MAV_CMD_DO_MOTOR_TEST
+                        0,          # confirmation
+                        float(m),   # p1: motor (1-indexed)
+                        0.0,        # p2: throttle type = percent
+                        0.0,        # p3: 0% throttle
+                        0.0,        # p4: 0s duration
+                        0.0, 0.0, 0.0,
+                    )
+                except Exception:
+                    pass
+        return {"status": "ok", "motor": "all", "throttle_pct": 0, "duration_s": 0, "stopped": True}
+
+    motor = max(1, min(8, motor_num))
+    # MAV_CMD_DO_MOTOR_TEST = 209
+    out = await link_manager.send_command(
+        link_manager.primary_sysid,
+        link_manager.primary_compid,
+        209,
+        float(motor),    # p1: motor number (1-indexed)
+        0.0,             # p2: throttle type 0=%, 1=PWM
+        float(throttle), # p3: throttle %
+        float(duration), # p4: timeout seconds
+        0.0, 0.0, 0.0,
+    )
+    return {"status": "ok" if out.get("accepted") else "failed",
+            "motor": motor, "throttle_pct": throttle, "duration_s": duration, **out}
+
+
+# ─── Setup: parameter helpers ────────────────────────────────────────────────
+def _get_params(keys: list) -> dict:
+    if not parameter_manager:
+        return {}
+    return {k: parameter_manager.parameters.get(k) for k in keys}
+
+async def _set_params_verified(updates: dict) -> dict:
+    results = {}
+    for pid, val in updates.items():
+        try:
+            out = await parameter_manager.set_parameter_verified(pid, float(val))
+            results[pid] = out
+        except Exception as e:
+            results[pid] = {"ok": False, "error": str(e), "rolled_back": False}
+    return results
+
+
+# ─── Setup: Flight Modes ─────────────────────────────────────────────────────
+_FLIGHT_MODE_PARAMS = ['FLTMODE1', 'FLTMODE2', 'FLTMODE3', 'FLTMODE4', 'FLTMODE5', 'FLTMODE6']
+
+class FlightModesRequest(BaseModel):
+    modes: dict
+
+@app.get("/setup/flight_modes")
+async def get_flight_modes():
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    return {"modes": _get_params(_FLIGHT_MODE_PARAMS)}
+
+@app.post("/setup/flight_modes")
+async def set_flight_modes(req: FlightModesRequest):
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    updates = {k: v for k, v in req.modes.items() if k in _FLIGHT_MODE_PARAMS}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid flight mode params")
+    results = await _set_params_verified(updates)
+    all_ok = all(r.get("ok", False) for r in results.values())
+    return {"status": "ok" if all_ok else "partial", "results": results}
+
+
+# ─── Setup: Failsafe ────────────────────────────────────────────────────────
+_FAILSAFE_PARAMS = [
+    'FS_BATT_ENABLE', 'FS_BATT_VOLTAGE', 'FS_BATT_MAH',
+    'FS_RC_ENABLE', 'FS_GCS_ENABLE',
+    'FS_EKF_ACTION', 'FS_EKF_THRESH',
+    'RTL_ALT', 'LAND_SPEED',
+    'FS_CRASH_CHECK', 'FS_VIBE_ENABLE',
+]
+
+class FailsafeRequest(BaseModel):
+    params: dict
+
+@app.get("/setup/failsafe")
+async def get_failsafe():
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    return {"params": _get_params(_FAILSAFE_PARAMS)}
+
+@app.post("/setup/failsafe")
+async def set_failsafe(req: FailsafeRequest):
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    updates = {k: v for k, v in req.params.items() if k in _FAILSAFE_PARAMS}
+    results = await _set_params_verified(updates)
+    all_ok = all(r.get("ok", False) for r in results.values())
+    return {"status": "ok" if all_ok else "partial", "results": results}
+
+
+# ─── Setup: Battery Monitor ──────────────────────────────────────────────────
+_BATTERY_PARAMS = [
+    'BATT_MONITOR', 'BATT_VOLT_PIN', 'BATT_CURR_PIN',
+    'BATT_VOLT_MULT', 'BATT_AMP_PERVLT',
+    'BATT_CAPACITY', 'BATT_LOW_VOLT', 'BATT_CRT_VOLT',
+    'BATT_LOW_MAH', 'BATT_CRT_MAH',
+    'BATT_ARM_VOLT', 'BATT_ARM_MAH',
+]
+
+class BatteryConfigRequest(BaseModel):
+    params: dict
+
+@app.get("/setup/battery")
+async def get_battery_config():
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    return {"params": _get_params(_BATTERY_PARAMS)}
+
+@app.post("/setup/battery")
+async def set_battery_config(req: BatteryConfigRequest):
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    updates = {k: v for k, v in req.params.items() if k in _BATTERY_PARAMS}
+    results = await _set_params_verified(updates)
+    all_ok = all(r.get("ok", False) for r in results.values())
+    return {"status": "ok" if all_ok else "partial", "results": results}
+
+
+# ─── Setup: Radio Calibration ────────────────────────────────────────────────
+def _radio_param_list() -> list:
+    keys = []
+    for i in range(1, 17):
+        for s in ['MIN', 'MAX', 'TRIM', 'DZ', 'REVERSED']:
+            keys.append(f'RC{i}_{s}')
+    return keys
+
+class RadioCalRequest(BaseModel):
+    params: dict
+
+@app.get("/setup/radio")
+async def get_radio_config():
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    return {"params": _get_params(_radio_param_list())}
+
+@app.post("/setup/radio")
+async def set_radio_config(req: RadioCalRequest):
+    if not parameter_manager:
+        raise HTTPException(status_code=500, detail="Parameter manager not initialized")
+    valid = set(_radio_param_list())
+    updates = {k: v for k, v in req.params.items() if k in valid}
+    results = await _set_params_verified(updates)
+    all_ok = all(r.get("ok", False) for r in results.values())
+    return {"status": "ok" if all_ok else "partial", "results": results, "written": len(updates)}
+
 
 @app.get("/mavlink/inspector")
 async def mavlink_inspector():

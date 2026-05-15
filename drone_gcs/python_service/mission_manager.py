@@ -142,6 +142,32 @@ class MissionManager:
         while not self.message_queue.empty():
             self.message_queue.get_nowait()
 
+    def _inject_home(self, items: List[MissionItem]) -> List[MissionItem]:
+        """Inject HOME waypoint at seq=0 (ArduPilot requirement for missions)."""
+        if not items:
+            return items
+        first = items[0]
+        # If first item is already a HOME-style waypoint (absolute frame, seq=0, WAYPOINT cmd)
+        if first.seq == 0 and first.command == 16 and first.frame in (0, 6):
+            return items
+        # Build HOME from vehicle home position if available
+        home_lat, home_lng, home_alt = 0.0, 0.0, 0.0
+        if self.lm.primary_sysid in self.lm.vehicles:
+            h = self.lm.vehicles[self.lm.primary_sysid].home
+            if getattr(h, 'valid', False):
+                home_lat, home_lng, home_alt = h.lat, h.lng, h.alt_m
+        home_item = MissionItem(
+            seq=0, frame=0, command=16,  # MAV_FRAME_GLOBAL, MAV_CMD_NAV_WAYPOINT
+            current=0, autocontinue=1,
+            param1=0.0, param2=0.0, param3=0.0, param4=0.0,
+            lat=home_lat, lng=home_lng, alt=home_alt,
+        )
+        renumbered = [
+            MissionItem(**{**item.model_dump(), 'seq': i + 1})
+            for i, item in enumerate(items)
+        ]
+        return [home_item] + renumbered
+
     async def upload_mission(self, items: List[MissionItem], mission_type: str = "MISSION") -> bool:
         """Uploads a mission to the drone using the MAVLink mission protocol."""
         session_id = uuid.uuid4().hex
@@ -179,8 +205,12 @@ class MissionManager:
         mav = self.lm.conn.mav
         mission_type_value = self._mission_type_value(mission_type)
 
+        # Inject HOME at seq=0 for ArduPilot missions (MP always does this)
+        if mission_type.upper() == "MISSION":
+            items = self._inject_home(items)
+
         self.clear_queue()
-        logger.info(f"Starting upload of {len(items)} {mission_type} items...")
+        logger.info(f"Starting upload of {len(items)} {mission_type} items (with HOME)...")
         self._set_transfer(
             session_id=session_id,
             phase="SENDING_COUNT",
@@ -196,14 +226,13 @@ class MissionManager:
         )
 
         retries = 0
-        # 1. Send MISSION_COUNT
+        # 1. Send MISSION_COUNT — retry 3 times at 1.0s each
         for attempt in range(3):
             if attempt > 0: retries += 1
-            mav.mission_count_send(
-                sysid, compid, len(items),
-                mission_type_value
-            )
-            req = await self.wait_for_message(['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'], timeout=1.0, expected_mission_type=mission_type_value)
+            mav.mission_count_send(sysid, compid, len(items), mission_type_value)
+            req = await self.wait_for_message(
+                ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
+                timeout=1.0, expected_mission_type=mission_type_value)
             if req:
                 break
         else:
@@ -218,12 +247,13 @@ class MissionManager:
             self._commit_history()
             return False
 
-        # 2. Upload each item
+        # 2. Upload each item — 10 retries at 0.45s each (matches MP setWPAsync)
         seq_to_send = req.seq
         self._set_transfer(phase="UPLOADING_ITEMS", current=int(seq_to_send))
         while seq_to_send < len(items):
             item = items[seq_to_send]
-            for attempt in range(3):
+            item_sent = False
+            for attempt in range(10):
                 if attempt > 0: retries += 1
                 mav.mission_item_int_send(
                     sysid, compid,
@@ -236,27 +266,42 @@ class MissionManager:
                     int(item.lat * 1e7), int(item.lng * 1e7), item.alt,
                     mission_type_value
                 )
-                
-                # Wait for next request or final ack
-                msg = await self.wait_for_message(['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'], timeout=1.0, expected_mission_type=mission_type_value)
+                msg = await self.wait_for_message(
+                    ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
+                    timeout=0.45, expected_mission_type=mission_type_value)
                 if msg:
                     if msg.get_type() in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
                         seq_to_send = msg.seq
                         self._set_transfer(current=int(min(max(seq_to_send, 0), len(items))), retries=retries)
+                        item_sent = True
                         break
                     elif msg.get_type() == 'MISSION_ACK':
-                        if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        ack_type = int(getattr(msg, 'type', -1))
+                        if ack_type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
                             logger.info("Mission upload successful!")
-                            self._set_transfer(phase="DONE", ok=True, current=len(items), last_ack=int(msg.type), error="", mission_version=uuid.uuid4().hex[:8], duration_s=time.time() - start_time, retries=retries)
+                            self._set_transfer(phase="DONE", ok=True, current=len(items), last_ack=ack_type, error="", mission_version=uuid.uuid4().hex[:8], duration_s=time.time() - start_time, retries=retries)
                             self._commit_history()
                             return True
+                        elif ack_type == mavutil.mavlink.MAV_MISSION_INVALID_SEQUENCE:
+                            # Vehicle confused about sequence — wait for it to tell us what it wants
+                            logger.warning(f"MISSION_INVALID_SEQUENCE at item {seq_to_send}, waiting for vehicle REQUEST...")
+                            recovery = await self.wait_for_message(
+                                ['MISSION_REQUEST_INT', 'MISSION_REQUEST'],
+                                timeout=1.5, expected_mission_type=mission_type_value)
+                            if recovery:
+                                seq_to_send = recovery.seq
+                                self._set_transfer(current=int(min(max(seq_to_send, 0), len(items))), retries=retries)
+                                item_sent = True
+                            break  # restart the per-item loop from new seq
                         else:
-                            logger.error(f"Mission upload failed: {msg}")
-                            self._set_transfer(phase="FAILED", ok=False, current=int(seq_to_send), last_ack=int(msg.type), error="ack_rejected", duration_s=time.time() - start_time, retries=retries)
+                            logger.error(f"Mission upload failed with ACK type {ack_type}")
+                            self._set_transfer(phase="FAILED", ok=False, current=int(seq_to_send), last_ack=ack_type, error="ack_rejected", duration_s=time.time() - start_time, retries=retries)
                             self._commit_history()
                             return False
-                
-            else:
+
+            if not item_sent and seq_to_send >= len(items):
+                break
+            if not item_sent:
                 logger.error(f"Mission upload failed: Timeout sending item {seq_to_send}.")
                 self._set_transfer(phase="FAILED", ok=False, current=int(seq_to_send), error="item_timeout", duration_s=time.time() - start_time, retries=retries)
                 self._commit_history()
@@ -326,13 +371,11 @@ class MissionManager:
         )
 
         retries = 0
-        # 1. Request List
-        for attempt in range(3):
+        # 1. Request List — 6 retries at 0.7s (matches MP getWPCountAsync: 6 retries × 700ms)
+        for attempt in range(6):
             if attempt > 0: retries += 1
-            mav.mission_request_list_send(
-                sysid, compid, mission_type_value
-            )
-            count_msg = await self.wait_for_message(['MISSION_COUNT'], timeout=0.5, expected_mission_type=mission_type_value)
+            mav.mission_request_list_send(sysid, compid, mission_type_value)
+            count_msg = await self.wait_for_message(['MISSION_COUNT'], timeout=0.7, expected_mission_type=mission_type_value)
             if count_msg:
                 break
         else:
@@ -345,21 +388,19 @@ class MissionManager:
         self._set_transfer(phase="DOWNLOADING_ITEMS", total=int(count), current=0)
         if count == 0:
             logger.info("Mission is empty.")
-            # Send ACK
             mav.mission_ack_send(sysid, compid, mavutil.mavlink.MAV_MISSION_ACCEPTED, mission_type_value)
             self._set_transfer(phase="DONE", ok=True, total=0, current=0, last_ack=int(mavutil.mavlink.MAV_MISSION_ACCEPTED), error="", duration_s=time.time() - start_time, retries=retries)
             self._commit_history()
             return []
 
         items = []
-        # 2. Download items
+        # 2. Download items — 5 retries at 2.5s each (matches MP getWPAsync: 5 retries × 2500ms)
         for seq in range(count):
-            for attempt in range(3):
+            for attempt in range(5):
                 if attempt > 0: retries += 1
-                mav.mission_request_int_send(
-                    sysid, compid, seq, mission_type_value
-                )
-                item_msg = await self.wait_for_message(['MISSION_ITEM_INT', 'MISSION_ITEM'], timeout=1.0, expected_mission_type=mission_type_value)
+                mav.mission_request_int_send(sysid, compid, seq, mission_type_value)
+                item_msg = await self.wait_for_message(
+                    ['MISSION_ITEM_INT', 'MISSION_ITEM'], timeout=2.5, expected_mission_type=mission_type_value)
                 if item_msg and item_msg.seq == seq:
                     is_int = item_msg.get_type() == "MISSION_ITEM_INT"
                     raw_x = float(getattr(item_msg, "x", 0.0))

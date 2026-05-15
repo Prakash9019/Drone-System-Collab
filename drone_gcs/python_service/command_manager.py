@@ -129,14 +129,15 @@ class CommandManager:
                             self.lm.conn.mav.command_long_send(
                                 sysid, compid,
                                 command,
-                                0,  # confirmation
+                                attempt,  # confirmation increments per retry (MP convention)
                                 p1, p2, p3, p4, p5, p6, p7
                             )
                     except Exception as e:
                         logger.error(f"Failed to send command {command}: {e}")
 
-                    # Determine initial timeout
-                    timeout_duration = 5.0 if command == 400 else 3.0
+                    # ARM/DISARM (400): 10s timeout matching Mission Planner doARMAsync.
+                    # All other commands: 3s.
+                    timeout_duration = 10.0 if command == 400 else 3.0
                     deadline = time.time() + timeout_duration
                     
                     command_completed = False

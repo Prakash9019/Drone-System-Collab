@@ -99,7 +99,14 @@ const StatusTab = ({ vehicleState }) => {
   const toggleGroup = (g) => setCollapsed(c => ({ ...c, [g]: !c[g] }));
 
   if (!vehicleState) {
-    return <div className="tab-empty">No telemetry. Connect to vehicle.</div>;
+    return (
+      <div className="status-tab">
+        <input className="status-search" placeholder="🔍 Filter fields..." disabled value="" onChange={() => {}} />
+        <div style={{ padding: '20px 12px', color: '#4b5563', fontSize: 13 }}>
+          No telemetry — connect vehicle to see live status data.
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -1,9 +1,7 @@
 import React from 'react';
 
 const ServoTab = ({ vehicleState }) => {
-  if (!vehicleState) return <div className="tab-empty">No telemetry. Connect to vehicle.</div>;
-
-  const channels = vehicleState.servo_output?.channels || {};
+  const channels = (vehicleState?.servo_output?.channels) || {};
   const keys = Object.keys(channels)
     .map((k) => Number(k))
     .filter((k) => !Number.isNaN(k))
@@ -11,8 +9,8 @@ const ServoTab = ({ vehicleState }) => {
 
   if (!keys.length) {
     return (
-      <div className="tab-empty">
-        No SERVO_OUTPUT_RAW data yet.
+      <div style={{ padding: '16px 12px', color: '#4b5563', fontSize: 13 }}>
+        {vehicleState ? 'No SERVO_OUTPUT_RAW data yet.' : 'Not connected — connect vehicle to see servo outputs.'}
       </div>
     );
   }
