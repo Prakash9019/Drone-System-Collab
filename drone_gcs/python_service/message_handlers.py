@@ -166,7 +166,30 @@ def handle_message(msg: any, state: VehicleState):
         state.status_messages.append(new_msg)
         if len(state.status_messages) > 50:
             state.status_messages.pop(0)
-        
+        # Capture fence-related STATUSTEXT so the Fence diagnostics panel can show *why*
+        # the autopilot triggered a breach action. ArduPilot emits lines like
+        # "Fence Breach Polygon", "Fence Breach Circle", "Fence Breach Alt Max",
+        # "Fence Disabled", "Fence Enabled".
+        text = msg.text or ""
+        if isinstance(text, bytes):
+            try:
+                text = text.decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+        if "fence" in text.lower() or "breach" in text.lower():
+            state.fence_status.last_breach_text = text.strip()
+            state.fence_status.last_breach_text_ts = time.time()
+
+    elif msg_type == 'FENCE_STATUS':
+        # 1 Hz when armed. Tells us if a fence is currently breached and which type.
+        state.fence_status.breach_status = int(getattr(msg, 'breach_status', 0))
+        state.fence_status.breach_type = int(getattr(msg, 'breach_type', 0))
+        state.fence_status.breach_count = int(getattr(msg, 'breach_count', 0))
+        state.fence_status.breach_time = int(getattr(msg, 'breach_time', 0))
+        state.fence_status.breach_mitigation = int(getattr(msg, 'breach_mitigation', 0))
+        state.fence_status.valid = True
+
+
     elif msg_type == 'TIMESYNC':
         # Simple latency estimation: Current time - ts1
         # If tc1 is 0, it's a request from drone. If we sent it, ts1 is our timestamp

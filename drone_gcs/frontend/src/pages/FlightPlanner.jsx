@@ -6,9 +6,23 @@ import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetrySt
 import MapEditor from '../components/MapEditor';
 import WaypointTable from '../components/WaypointTable';
 import SurveyGridPanel from '../components/SurveyGridPanel';
-import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle } from 'lucide-react';
+import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { pointInPolygon, fencePolygonsFromWaypoints, haversineM } from '../utils/geometry';
 
 const API_URL = 'http://localhost:8080';
+
+// Compact label/value cell for the Fence diagnostics panel.
+// `good=false` paints amber when value should be true and isn't (e.g. HOME inside polygon).
+// `muted` greys it out for purely informational values (Action label, etc.).
+function Diag({ label, value, good = true, muted = false }) {
+  const colour = muted ? 'var(--text-secondary)' : (good ? '#4ade80' : '#fbbf24');
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, padding: '2px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.03)' }}>
+      <span style={{ opacity: 0.75 }}>{label}</span>
+      <strong style={{ color: colour }}>{value}</strong>
+    </div>
+  );
+}
 
 const extractErrText = (err, fallback) => {
   const d = err?.response?.data;
@@ -166,6 +180,11 @@ const FlightPlanner = () => {
   const [showValidation, setShowValidation] = useState(false);
   const [fenceForm, setFenceForm] = useState({
     enabled: false, action: 0, radius: 100.0, alt_max: 120.0, alt_min: 0.0, margin: 2.0,
+    // FENCE_TYPE bitmask: 1=altmax 2=circle 4=polygon 8=altmin. 7 = Copter default
+    // (altmax + circle + polygon). Exposed because the circle bit + a small RADIUS is
+    // the most common cause of "AUTO → RTL right after takeoff" — user wants polygon
+    // only and didn't realise circle was on too.
+    fence_type: 7,
   });
   // Ref (not state) so the polling closure always reads the latest value without restarting the interval.
   const fenceFormDirtyRef = useRef(false);
@@ -190,6 +209,62 @@ const FlightPlanner = () => {
     if (missionType !== 'FENCE' || !waypoints.length) return [];
     return buildFencePolygonGroups(waypoints);
   }, [waypoints, missionType]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Fence diagnostics — answers the brief's required indicators:
+  //   Enabled, Active, Inside Inclusion, Inside Exclusion, Breach, Reason, Action.
+  //
+  // The "inside/outside" answer is computed client-side from the drawn polygons
+  // and current GPS, because ArduPilot doesn't tell us inside/outside — only
+  // whether a breach is currently active (via FENCE_STATUS). This lets the user
+  // see "HOME is outside the inclusion polygon" BEFORE they arm, instead of
+  // discovering it the hard way mid-flight.
+  // ───────────────────────────────────────────────────────────────────────────
+  const fenceDiagnostics = useMemo(() => {
+    const polys = fencePolygonsFromWaypoints(waypoints, FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION);
+    const inclusions = polys.filter(p => p.type === 'inclusion');
+    const exclusions = polys.filter(p => p.type === 'exclusion');
+    const pos = vehicle?.position;
+    const home = vehicle?.home;
+    const ok = (n) => Number.isFinite(Number(n));
+    const insideAnyInclusion = (lat, lng) =>
+      inclusions.length === 0 ? null : inclusions.some(p => pointInPolygon(lat, lng, p.points));
+    const insideAnyExclusion = (lat, lng) =>
+      exclusions.length === 0 ? false : exclusions.some(p => pointInPolygon(lat, lng, p.points));
+
+    const homeInside = (home?.valid && ok(home.lat) && ok(home.lng))
+      ? insideAnyInclusion(home.lat, home.lng) : null;
+    const homeInExcl = (home?.valid && ok(home.lat) && ok(home.lng))
+      ? insideAnyExclusion(home.lat, home.lng) : false;
+    const vehicleInside = (pos && ok(pos.lat) && ok(pos.lng) && (pos.lat !== 0 || pos.lng !== 0))
+      ? insideAnyInclusion(pos.lat, pos.lng) : null;
+    const vehicleInExcl = (pos && ok(pos.lat) && ok(pos.lng) && (pos.lat !== 0 || pos.lng !== 0))
+      ? insideAnyExclusion(pos.lat, pos.lng) : false;
+
+    const fenceType = Number(fenceStatus?.fence_type ?? fenceForm.fence_type ?? 7);
+    const radiusM = Number(fenceStatus?.radius ?? fenceForm.radius ?? 0);
+    const circleActive = (fenceType & 0x2) && radiusM > 0;
+    const polygonActive = (fenceType & 0x4) === 0x4;
+
+    const fs = fenceStatus?.fence_status_msg;
+    return {
+      polygonCounts: { inclusion: inclusions.length, exclusion: exclusions.length },
+      homeInside,
+      homeInExcl,
+      vehicleInside,
+      vehicleInExcl,
+      circleActive: !!circleActive,
+      polygonActive,
+      radiusM,
+      enabled: !!(fenceStatus?.enabled ?? fenceEnabled),
+      action: Number(fenceStatus?.action ?? fenceAction),
+      breachActive: !!(fs?.valid && fs?.breach_status > 0),
+      breachType: Number(fs?.breach_type ?? 0),
+      breachCount: Number(fs?.breach_count ?? 0),
+      breachMitigation: Number(fs?.breach_mitigation ?? 0),
+      lastBreachText: fs?.last_breach_text || '',
+    };
+  }, [waypoints, vehicle?.position, vehicle?.home, fenceStatus, fenceForm.fence_type, fenceForm.radius, fenceEnabled, fenceAction]);
 
   const surveySeed = useMemo(() => {
     if (surveyFromNav?.lat != null && surveyFromNav?.lng != null) {
@@ -380,6 +455,7 @@ const FlightPlanner = () => {
             alt_max: Number(res.data?.alt_max ?? 120),
             alt_min: Number(res.data?.alt_min ?? 0),
             margin: Number(res.data?.margin ?? 2),
+            fence_type: Number(res.data?.fence_type ?? 7),
           });
         }
       } catch { setFenceStatus(null); }
@@ -409,6 +485,7 @@ const FlightPlanner = () => {
         alt_max: Number(res.data?.alt_max ?? 120),
         alt_min: Number(res.data?.alt_min ?? 0),
         margin: Number(res.data?.margin ?? 2),
+        fence_type: Number(res.data?.fence_type ?? 7),
       });
     } catch (err) {
       setStatusMsg(extractErrText(err, 'Failed to apply fence configuration.'));
@@ -475,10 +552,47 @@ const FlightPlanner = () => {
     insertWaypointAt(0, { command: 22, frame: 3, alt: 10, lat: homeLat, lng: homeLng });
   };
 
+  // ─── Mission-vs-fence preflight ────────────────────────────────────────────
+  // useMissionStore keeps a per-type saved buffer (_missionSaved / _fenceSaved /
+  // _rallySaved). We need to validate mission WPs against the fence polygons even
+  // when the user is currently looking at MISSION. Read both buffers directly.
+  const savedFenceWps = useMissionStore((s) => s._fenceSaved);
+  const fencePolyForCheck = useMemo(
+    () => fencePolygonsFromWaypoints(savedFenceWps || [], FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION),
+    [savedFenceWps]
+  );
+  const missionVsFence = useMemo(() => {
+    if (missionType !== 'MISSION') return { homeInside: null, homeInExcl: false, wpsBad: [], wpsExcl: [], altMaxBad: [], hasFence: fencePolyForCheck.length > 0 };
+    const incl = fencePolyForCheck.filter(p => p.type === 'inclusion');
+    const excl = fencePolyForCheck.filter(p => p.type === 'exclusion');
+    const home = vehicle?.home;
+    const homeInside = (incl.length && home?.valid)
+      ? incl.some(p => pointInPolygon(home.lat, home.lng, p.points)) : null;
+    const homeInExcl = (excl.length && home?.valid)
+      ? excl.some(p => pointInPolygon(home.lat, home.lng, p.points)) : false;
+    const altMax = Number(fenceStatus?.alt_max ?? fenceForm.alt_max ?? 0);
+    const wpsBad = [];
+    const wpsExcl = [];
+    const altMaxBad = [];
+    // Position waypoints only (skip TAKEOFF/RTL/LAND which have no lat/lng of their own).
+    waypoints.forEach(wp => {
+      const cmd = Number(wp.command);
+      const hasPos = wp.lat && wp.lng && (cmd !== 22 && cmd !== 20);
+      if (hasPos && incl.length && !incl.some(p => pointInPolygon(wp.lat, wp.lng, p.points))) {
+        wpsBad.push(wp.seq);
+      }
+      if (hasPos && excl.length && excl.some(p => pointInPolygon(wp.lat, wp.lng, p.points))) {
+        wpsExcl.push(wp.seq);
+      }
+      if (altMax > 0 && Number(wp.alt) > altMax) altMaxBad.push(wp.seq);
+    });
+    return { homeInside, homeInExcl, wpsBad, wpsExcl, altMaxBad, hasFence: fencePolyForCheck.length > 0 };
+  }, [missionType, waypoints, fencePolyForCheck, vehicle?.home, fenceStatus?.alt_max, fenceForm.alt_max]);
+
   // Pre-flight checklist for mission start
   const preflightChecks = useMemo(() => {
     if (missionType !== 'MISSION') return [];
-    return [
+    const checks = [
       { label: 'Connected',    ok: !!vehicle?.status },
       { label: 'GPS lock',     ok: Number(vehicle?.status?.gps_fix ?? 0) >= 3 },
       { label: 'Home set',     ok: !!vehicle?.home?.valid },
@@ -487,7 +601,13 @@ const FlightPlanner = () => {
       { label: 'Armed',        ok: !!vehicle?.status?.armed },
       { label: 'AUTO mode',    ok: inAutoMode },
     ];
-  }, [missionType, vehicle, hasTakeoffCmd, waypoints.length, inAutoMode]);
+    if (missionVsFence.hasFence) {
+      checks.push({ label: 'HOME in fence',   ok: missionVsFence.homeInside !== false && !missionVsFence.homeInExcl });
+      checks.push({ label: 'WPs in fence',    ok: missionVsFence.wpsBad.length === 0 && missionVsFence.wpsExcl.length === 0 });
+      checks.push({ label: 'Alt < AltMax',    ok: missionVsFence.altMaxBad.length === 0 });
+    }
+    return checks;
+  }, [missionType, vehicle, hasTakeoffCmd, waypoints.length, inAutoMode, missionVsFence]);
 
   const canStartMission = !loading && waypoints.length > 0 && !!vehicle?.status?.armed && inAutoMode && hasTakeoffCmd;
 
@@ -496,6 +616,7 @@ const FlightPlanner = () => {
       {surveyOpen && missionType === 'MISSION' && (
         <SurveyGridPanel
           seed={surveySeed || undefined}
+          home={vehicle?.home}
           replaceWaypoints={replaceWaypoints}
           appendWaypoints={appendWaypoints}
           onClose={() => { setSurveyOpen(false); setSurveyFromNav(null); }}
@@ -667,10 +788,112 @@ const FlightPlanner = () => {
               ⚠ Margin ≥ Radius — ArduPilot will reject
             </span>
           )}
+          {/* FENCE_TYPE bitmask. Lets the user turn off the circle fence — the
+              most common silent cause of AUTO → RTL right after takeoff when a
+              small leftover FENCE_RADIUS is still in EEPROM. */}
+          <span className="status-msg" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, opacity: 0.9 }}>
+            Types:
+            {[
+              { bit: 1, label: 'AltMax' },
+              { bit: 2, label: 'Circle' },
+              { bit: 4, label: 'Polygon' },
+              { bit: 8, label: 'AltMin' },
+            ].map(({ bit, label }) => (
+              <label key={bit} style={{ display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={!!(fenceForm.fence_type & bit)}
+                  onChange={(e) => {
+                    fenceFormDirtyRef.current = true;
+                    setFenceForm(s => ({
+                      ...s,
+                      fence_type: e.target.checked
+                        ? (s.fence_type | bit)
+                        : (s.fence_type & ~bit),
+                    }));
+                  }}
+                  disabled={loading}
+                />
+                {label}
+              </label>
+            ))}
+          </span>
           <button className="btn-toolbar primary" onClick={applyFenceConfig} disabled={loading || (fenceForm.radius > 0 && fenceForm.margin >= fenceForm.radius)}>Apply Fence Config</button>
           <span className="status-msg" style={{ opacity: 0.75, fontSize: 11 }}>
             Draw polygon → Write → Enable → set Margin &lt; Radius → Apply Config
           </span>
+        </div>
+      )}
+
+      {/* ─── Fence diagnostics panel ──────────────────────────────────────── */}
+      {missionType === 'FENCE' && (
+        <div className="mission-toolbar" style={{
+          height: 'auto',
+          minHeight: 'auto',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          gap: 6,
+          padding: '8px 12px',
+          background: fenceDiagnostics.breachActive
+            ? 'rgba(239,68,68,0.12)'
+            : 'rgba(34,197,94,0.04)',
+          borderColor: fenceDiagnostics.breachActive ? '#ef4444' : 'var(--border-color)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 600 }}>
+            {fenceDiagnostics.breachActive
+              ? <ShieldAlert size={14} color="#ef4444" />
+              : <ShieldCheck size={14} color="#22c55e" />}
+            Fence diagnostics
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 6, fontSize: 11 }}>
+            <Diag label="Enabled" value={fenceDiagnostics.enabled ? 'YES' : 'NO'} good={fenceDiagnostics.enabled} />
+            <Diag label="Polygon active" value={fenceDiagnostics.polygonActive ? 'YES' : 'NO'} good={fenceDiagnostics.polygonActive} />
+            <Diag label="Circle active" value={fenceDiagnostics.circleActive ? `YES (${Math.round(fenceDiagnostics.radiusM)}m)` : 'NO'} muted />
+            <Diag label="Action on breach" value={['Report', 'RTL', 'Land', 'Brake', 'SmartRTL'][fenceDiagnostics.action] || `code ${fenceDiagnostics.action}`} muted />
+            <Diag
+              label="HOME inside inclusion"
+              value={fenceDiagnostics.homeInside == null ? '—' : (fenceDiagnostics.homeInside ? 'YES' : 'NO')}
+              good={fenceDiagnostics.homeInside !== false}
+            />
+            <Diag
+              label="HOME inside exclusion"
+              value={fenceDiagnostics.homeInExcl ? 'YES' : 'NO'}
+              good={!fenceDiagnostics.homeInExcl}
+            />
+            <Diag
+              label="Vehicle inside inclusion"
+              value={fenceDiagnostics.vehicleInside == null ? '—' : (fenceDiagnostics.vehicleInside ? 'YES' : 'NO')}
+              good={fenceDiagnostics.vehicleInside !== false}
+            />
+            <Diag
+              label="Vehicle inside exclusion"
+              value={fenceDiagnostics.vehicleInExcl ? 'YES' : 'NO'}
+              good={!fenceDiagnostics.vehicleInExcl}
+            />
+            <Diag
+              label="Breach (live)"
+              value={fenceDiagnostics.breachActive ? `YES — type ${fenceDiagnostics.breachType}` : 'NO'}
+              good={!fenceDiagnostics.breachActive}
+            />
+            <Diag label="Breach count" value={fenceDiagnostics.breachCount} muted />
+          </div>
+          {fenceDiagnostics.lastBreachText && (
+            <div style={{ fontSize: 11, color: '#fca5a5', borderTop: '1px solid rgba(239,68,68,0.3)', paddingTop: 4 }}>
+              <strong>Last fence msg:</strong> {fenceDiagnostics.lastBreachText}
+            </div>
+          )}
+          {fenceDiagnostics.homeInside === false && (
+            <div style={{ fontSize: 11, color: '#fbbf24' }}>
+              ⚠ HOME is OUTSIDE every inclusion polygon. The vehicle will breach the moment fence is enabled.
+              Most common cause: SITL home (Simulation page) doesn't match the area you drew on the map.
+              Set Simulation home to match the polygon and restart simulation.
+            </div>
+          )}
+          {fenceDiagnostics.homeInExcl && (
+            <div style={{ fontSize: 11, color: '#fbbf24' }}>
+              ⚠ HOME is INSIDE an exclusion polygon. Move the exclusion polygon or reposition HOME.
+            </div>
+          )}
         </div>
       )}
 

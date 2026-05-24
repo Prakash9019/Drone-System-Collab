@@ -112,6 +112,11 @@ const MapEditor = () => {
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, lat: null, lng: null });
   const [selectedMarkerSeq, setSelectedMarkerSeq] = useState(null);
   const [plannerBanner, setPlannerBanner] = useState('');
+  // AutoPan follows HOME (preferred) else the vehicle. Persisted in mapPreferences
+  // so it survives reloads. Auto-disables when the user drags the map so we don't
+  // fight their interaction — the toggle re-enables.
+  const [autoPan, setAutoPan] = useState(() => loadMapPrefs().autoPan !== false);
+  const lastAutoCenterRef = useRef(null);
 
   // ─── Map init ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -152,6 +157,18 @@ const MapEditor = () => {
     map.current.on('moveend', () => {
       const c = map.current.getCenter();
       saveMapPrefs({ center: [c.lng, c.lat], zoom: map.current.getZoom() });
+    });
+
+    // User drag turns off AutoPan — we don't want the map to keep snapping back
+    // while they're manually positioning. Toggle button re-enables it.
+    map.current.on('dragstart', (e) => {
+      // originalEvent is only present for user-initiated drags, not for our easeTo() calls.
+      if (e?.originalEvent) {
+        setAutoPan((prev) => {
+          if (prev) saveMapPrefs({ autoPan: false });
+          return false;
+        });
+      }
     });
 
     map.current.on('load', () => {
@@ -254,6 +271,34 @@ const MapEditor = () => {
         .addTo(map.current);
     }
   }, [vehicleHome?.lat, vehicleHome?.lng, vehicleHome?.valid]);
+
+  // ─── AutoPan: keep the map centred on HOME (preferred) or the vehicle ─────
+  // Rule: HOME wins when valid (operators usually want to see the launch area).
+  // When neither is available we leave the map where it is. We use easeTo with
+  // a short duration so the pan is visible but not jarring. We track the last
+  // auto-issued centre and skip if it's within ~3m to avoid jitter on noisy GPS.
+  useEffect(() => {
+    if (!map.current || !mapReady || !autoPan) return;
+    const homeValid = !!(vehicleHome?.valid)
+      && Number.isFinite(Number(vehicleHome.lat))
+      && Number.isFinite(Number(vehicleHome.lng))
+      && !(vehicleHome.lat === 0 && vehicleHome.lng === 0);
+    const pos = vehicleMapState?.position;
+    const target = homeValid
+      ? { lat: Number(vehicleHome.lat), lng: Number(vehicleHome.lng) }
+      : (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng) ? pos : null);
+    if (!target) return;
+    const last = lastAutoCenterRef.current;
+    if (last) {
+      // ~1e-5 deg ≈ 1.1 m; skip if we'd move less than ~3 m to avoid jitter.
+      const dLat = Math.abs(last.lat - target.lat);
+      const dLng = Math.abs(last.lng - target.lng);
+      if (dLat < 3e-5 && dLng < 3e-5) return;
+    }
+    lastAutoCenterRef.current = target;
+    map.current.easeTo({ center: [target.lng, target.lat], duration: 350, essential: true });
+  }, [autoPan, mapReady, vehicleHome?.lat, vehicleHome?.lng, vehicleHome?.valid,
+      vehicleMapState?.position?.lat, vehicleMapState?.position?.lng]);
 
   // ─── Waypoint markers + route + distance labels ───────────────────────────
   useEffect(() => {
@@ -421,6 +466,39 @@ const MapEditor = () => {
           {plannerBanner}
         </div>
       )}
+      {/* AutoPan toggle — sits in the top-left so it doesn't overlap maplibre's
+          NavigationControl (top-right). Clicking it also re-centres on whichever
+          target is current (HOME or vehicle). */}
+      <button
+        type="button"
+        onClick={() => {
+          const next = !autoPan;
+          setAutoPan(next);
+          saveMapPrefs({ autoPan: next });
+          if (next) {
+            // Force a recentre by clearing the dedupe ref. The effect will run.
+            lastAutoCenterRef.current = null;
+          }
+        }}
+        title={autoPan
+          ? 'AutoPan ON — map follows HOME or vehicle. Click to disable, or drag to pause.'
+          : 'AutoPan OFF — click to re-enable following.'}
+        style={{
+          position: 'absolute', top: 10, left: 10, zIndex: 105,
+          width: 34, height: 34, borderRadius: 6,
+          border: '1px solid ' + (autoPan ? '#10b981' : 'var(--border-color)'),
+          background: autoPan ? 'rgba(16,185,129,0.18)' : 'var(--bg-panel)',
+          color: autoPan ? '#34d399' : 'var(--text-secondary)',
+          cursor: 'pointer', fontSize: 16,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 0,
+        }}
+        aria-pressed={autoPan}
+        aria-label="Toggle AutoPan"
+      >
+        {/* Crosshair glyph — readable on both background colours */}
+        ⊕
+      </button>
       <div ref={mapContainer} className="map-container" />
       {contextMenu.visible && (
         <div className="context-menu" style={{ position: 'absolute', top: contextMenu.y, left: contextMenu.x, zIndex: 110 }}>

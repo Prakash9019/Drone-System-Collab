@@ -301,13 +301,28 @@ async def fence_status():
     params = {}
     if parameter_manager:
         params = parameter_manager.parameters
+    fs = None
+    if link_manager and link_manager.primary_sysid in link_manager.vehicles:
+        v = link_manager.vehicles[link_manager.primary_sysid]
+        fs = {
+            "breach_status": int(v.fence_status.breach_status),
+            "breach_type": int(v.fence_status.breach_type),
+            "breach_count": int(v.fence_status.breach_count),
+            "breach_time": int(v.fence_status.breach_time),
+            "breach_mitigation": int(v.fence_status.breach_mitigation),
+            "last_breach_text": v.fence_status.last_breach_text,
+            "last_breach_text_ts": v.fence_status.last_breach_text_ts,
+            "valid": bool(v.fence_status.valid),
+        }
     return {
         "enabled": bool(int(params.get("FENCE_ENABLE", 0))),
         "action": int(params.get("FENCE_ACTION", 0)),
+        "fence_type": int(params.get("FENCE_TYPE", 7)),
         "radius": float(params.get("FENCE_RADIUS", 0.0)),
         "alt_max": float(params.get("FENCE_ALT_MAX", 0.0)),
         "alt_min": float(params.get("FENCE_ALT_MIN", 0.0)),
         "margin": float(params.get("FENCE_MARGIN", 2.0)),
+        "fence_status_msg": fs,
     }
 
 class FenceConfigRequest(BaseModel):
@@ -317,6 +332,9 @@ class FenceConfigRequest(BaseModel):
     alt_max: float
     alt_min: float
     margin: float = 2.0
+    # FENCE_TYPE bitmask (1=altmax 2=circle 4=polygon 8=altmin). Optional — when None
+    # FENCE_TYPE is left untouched so the user's Setup→Parameters value survives.
+    fence_type: int | None = None
 
 @app.post("/fence/config")
 async def fence_config(req: FenceConfigRequest):
@@ -333,15 +351,18 @@ async def fence_config(req: FenceConfigRequest):
 
     # Write order matters: set FENCE_RADIUS before FENCE_MARGIN so ArduPilot never sees
     # margin >= radius mid-write, then enable last so the fence activates only after all
-    # parameters are consistent.
+    # parameters are consistent. FENCE_TYPE just before ENABLE so polygon/circle/altmax
+    # selection takes effect at the same instant the fence comes online.
     writes = [
         ("FENCE_ACTION", float(req.action)),
         ("FENCE_ALT_MAX", float(req.alt_max)),
         ("FENCE_ALT_MIN", float(req.alt_min)),
         ("FENCE_RADIUS", float(req.radius)),
         ("FENCE_MARGIN", float(req.margin)),
-        ("FENCE_ENABLE", 1.0 if req.enabled else 0.0),
     ]
+    if req.fence_type is not None:
+        writes.append(("FENCE_TYPE", float(int(req.fence_type) & 0xF)))
+    writes.append(("FENCE_ENABLE", 1.0 if req.enabled else 0.0))
     failures = []
     for param_id, value in writes:
         result = await parameter_manager.set_parameter_verified(param_id, value)

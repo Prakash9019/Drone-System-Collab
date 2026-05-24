@@ -119,6 +119,23 @@ class EKFOrigin:
     valid: bool = False
 
 @dataclass
+class FenceStatus:
+    """Mirrors the MAVLink FENCE_STATUS message + last fence STATUSTEXT.
+    breach_status: 0 = no breach, 1 = breach active
+    breach_type:   0=NONE 1=MINALT 2=MAXALT 3=BOUNDARY (polygon or circle)
+    breach_mitigation: 0=none 1=RTL 2=Land 3=Brake 4=SmartRTL
+    last_breach_text: most recent fence-related STATUSTEXT (filled by STATUSTEXT handler).
+    valid: True after we've seen at least one FENCE_STATUS msg."""
+    breach_status: int = 0
+    breach_type: int = 0
+    breach_count: int = 0
+    breach_time: int = 0
+    breach_mitigation: int = 0
+    last_breach_text: str = ""
+    last_breach_text_ts: float = 0.0
+    valid: bool = False
+
+@dataclass
 class VehicleState:
     sysid: int
     compid: int
@@ -139,6 +156,7 @@ class VehicleState:
     parameters: Dict[str, Any] = field(default_factory=dict)
     home: HomePosition = field(default_factory=HomePosition)
     ekf_origin: EKFOrigin = field(default_factory=EKFOrigin)
+    fence_status: FenceStatus = field(default_factory=FenceStatus)
     mission_current_seq: int = -1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -234,6 +252,16 @@ class VehicleState:
                 "lng": self.ekf_origin.lng,
                 "alt_m": self.ekf_origin.alt_m,
                 "valid": self.ekf_origin.valid,
+            },
+            "fence_status": {
+                "breach_status": self.fence_status.breach_status,
+                "breach_type": self.fence_status.breach_type,
+                "breach_count": self.fence_status.breach_count,
+                "breach_time": self.fence_status.breach_time,
+                "breach_mitigation": self.fence_status.breach_mitigation,
+                "last_breach_text": self.fence_status.last_breach_text,
+                "last_breach_text_ts": self.fence_status.last_breach_text_ts,
+                "valid": self.fence_status.valid,
             },
             "mission": {
                 "current_seq": self.mission_current_seq,

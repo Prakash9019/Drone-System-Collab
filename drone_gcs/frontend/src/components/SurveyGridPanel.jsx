@@ -5,6 +5,8 @@ const MAV_CMD_NAV_SPLINE_WAYPOINT = 82;
 const MAV_CMD_NAV_WAYPOINT = 16;
 const MAV_CMD_NAV_TAKEOFF = 22;
 const MAV_CMD_NAV_RTL = 20;
+const MAV_CMD_DO_CHANGE_SPEED = 178;
+const MAV_CMD_DO_SET_CAM_TRIGG_DIST = 206;
 
 // Compute line spacing from camera overlap % + altitude + sensor FOV
 function overlapToLineSpacing(overlapPct, altM, sensorWidthMm, focalLengthMm) {
@@ -17,7 +19,7 @@ function overlapToLineSpacing(overlapPct, altM, sensorWidthMm, focalLengthMm) {
   return Math.max(5, swath * (1 - overlap));
 }
 
-export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypoints, seed }) {
+export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypoints, seed, home }) {
   const [lat, setLat] = useState(seed?.lat ?? 37.7749);
   const [lng, setLng] = useState(seed?.lng ?? -122.4194);
   const [widthM, setWidthM] = useState(80);
@@ -29,6 +31,12 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
   const [useSpline, setUseSpline] = useState(false);
   const [addTakeoff, setAddTakeoff] = useState(true);
   const [addRtl, setAddRtl] = useState(true);
+  // Camera trigger every N metres (cmd 206). 0 = disabled. Default 5 m is a
+  // reasonable starting point for a fixed lens around 50 m AGL.
+  const [camTrigDistM, setCamTrigDistM] = useState(0);
+  // DO_CHANGE_SPEED in m/s. 0 = leave at WPNAV_SPEED. MP defaults survey speeds
+  // around 5-8 m/s for Copter; we offer it as opt-in.
+  const [surveySpeedMs, setSurveySpeedMs] = useState(0);
   const [gridError, setGridError] = useState('');
 
   // Camera overlap mode
@@ -85,15 +93,54 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
       });
 
       if (addTakeoff && wps.length > 0) {
-        const first = wps[0];
+        // TAKEOFF should be at HOME, not at the first grid corner. ArduCopter
+        // ignores lat/lng on TAKEOFF (climbs vertically), but the WP table looks
+        // wrong if TAKEOFF is shown in a random corner of the survey footprint.
+        const okHome = home?.valid && Number.isFinite(Number(home.lat)) && Number.isFinite(Number(home.lng));
+        const takeoffLat = okHome ? Number(home.lat) : wps[0].lat;
+        const takeoffLng = okHome ? Number(home.lng) : wps[0].lng;
         wps = [
-          { command: MAV_CMD_NAV_TAKEOFF, lat: first.lat, lng: first.lng, alt: altitudeM, frame: 3, param1: 0, param2: 0, param3: 0, param4: 0 },
+          { command: MAV_CMD_NAV_TAKEOFF, lat: takeoffLat, lng: takeoffLng, alt: altitudeM, frame: 3, param1: 0, param2: 0, param3: 0, param4: 0 },
           ...wps,
         ];
       }
 
+      // DO_CHANGE_SPEED (cmd 178). param1=type (0=airspeed, 1=groundspeed),
+      // param2=speed m/s, param3=throttle (-1=no change), param4=relative (0=absolute).
+      // Inserted right after TAKEOFF so it's the cruise speed for the survey.
+      if (surveySpeedMs > 0 && wps.length > 0) {
+        const insertAt = addTakeoff ? 1 : 0;
+        const speedWp = {
+          command: MAV_CMD_DO_CHANGE_SPEED,
+          lat: 0, lng: 0, alt: 0, frame: 3,
+          param1: 1, param2: surveySpeedMs, param3: -1, param4: 0,
+        };
+        wps = [...wps.slice(0, insertAt), speedWp, ...wps.slice(insertAt)];
+      }
+
+      // CAM_TRIGG_DIST (cmd 206). param1 = distance metres. Inserted right
+      // before the first grid waypoint so photos start at the survey entry.
+      if (camTrigDistM > 0 && wps.length > 0) {
+        const insertAt = (addTakeoff ? 1 : 0) + (surveySpeedMs > 0 ? 1 : 0);
+        const camWp = {
+          command: MAV_CMD_DO_SET_CAM_TRIGG_DIST,
+          lat: 0, lng: 0, alt: 0, frame: 3,
+          param1: camTrigDistM, param2: 0, param3: 1, param4: 0,
+        };
+        wps = [...wps.slice(0, insertAt), camWp, ...wps.slice(insertAt)];
+      }
+
       if (addRtl && wps.length > 0) {
         const last = wps[wps.length - 1];
+        // Stop camera trigger before RTL (param1=0 disables) to avoid shooting
+        // during the return leg — MP does the same.
+        if (camTrigDistM > 0) {
+          wps = [
+            ...wps,
+            { command: MAV_CMD_DO_SET_CAM_TRIGG_DIST, lat: 0, lng: 0, alt: 0, frame: 3,
+              param1: 0, param2: 0, param3: 1, param4: 0 },
+          ];
+        }
         wps = [
           ...wps,
           { command: MAV_CMD_NAV_RTL, lat: last.lat, lng: last.lng, alt: 0, frame: 3, param1: 0, param2: 0, param3: 0, param4: 0 },
@@ -173,10 +220,24 @@ export default function SurveyGridPanel({ onClose, replaceWaypoints, appendWaypo
           </label>
         </div>
 
+        {/* Camera trigger + survey speed — both opt-in, 0 = disabled */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+          <label style={row} title="DO_SET_CAM_TRIGG_DIST (cmd 206): photo every N metres. 0 = no camera trigger.">
+            Camera trigger every (m)
+            <input className="status-search" style={inp} value={camTrigDistM} onChange={e => setCamTrigDistM(Number(e.target.value) || 0)} type="number" min={0} step="0.5" />
+          </label>
+          <label style={row} title="DO_CHANGE_SPEED (cmd 178): cruise speed for the survey. 0 = leave at WPNAV_SPEED.">
+            Survey speed (m/s)
+            <input className="status-search" style={inp} value={surveySpeedMs} onChange={e => setSurveySpeedMs(Number(e.target.value) || 0)} type="number" min={0} step="0.5" />
+          </label>
+        </div>
+
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
           Estimated waypoints: <strong style={{ color: 'var(--text-primary)' }}>{previewCount}</strong>
           {addTakeoff && <span style={{ color: '#f59e0b' }}> (incl. TAKEOFF)</span>}
           {addRtl && <span style={{ color: '#f97316' }}> (incl. RTL)</span>}
+          {camTrigDistM > 0 && <span style={{ color: '#10b981' }}> (+ CAM)</span>}
+          {surveySpeedMs > 0 && <span style={{ color: '#0ea5e9' }}> (+ SPEED)</span>}
         </div>
 
         {gridError && <div style={{ fontSize: 12, color: '#fca5a5', marginBottom: 10 }}>{gridError}</div>}
