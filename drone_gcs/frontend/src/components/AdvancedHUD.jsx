@@ -1,6 +1,49 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect, useState, useRef } from 'react';
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+// Haversine distance in metres — used for distance-to-home and any HUD ground-truth distances.
+function haversineM(lat1, lng1, lat2, lng2) {
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return null;
+  const R = 6378137.0;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// MAV_SYS_STATUS_SENSOR bit labels — used by the pre-arm summary overlay. Order matters: the
+// HUD lists the first failing sensor by this order, matching Mission Planner's PreArm display.
+const MAV_SYS_STATUS_SENSORS = [
+  [0x01,        'Gyro'],
+  [0x02,        'Accel'],
+  [0x04,        'Mag'],
+  [0x08,        'Baro'],
+  [0x10,        'DiffPress'],
+  [0x20,        'GPS'],
+  [0x40,        'OptFlow'],
+  [0x80,        'Vision'],
+  [0x100,       'Laser'],
+  [0x400,       'RateCtrl'],
+  [0x800,       'AttStab'],
+  [0x1000,      'YawPos'],
+  [0x2000,      'AltCtrl'],
+  [0x4000,      'XYCtrl'],
+  [0x8000,      'Motors'],
+  [0x10000,     'RC'],
+  [0x20000,     'Gyro2'],
+  [0x40000,     'Accel2'],
+  [0x80000,     'Mag2'],
+  [0x100000,    'Fence'],
+  [0x200000,    'AHRS'],
+  [0x400000,    'Terrain'],
+  [0x2000000,   'Battery'],
+  [0x4000000,   'Proximity'],
+  [0x10000000,  'PreArm'],
+  [0x20000000,  'Avoidance'],
+];
 
 // ─── Compass Strip ─────────────────────────────────────────────────────────────
 // 3-copy strip so heading wrap never shows a gap.
@@ -253,8 +296,75 @@ function AltitudeTape({ altitude, climbRate }) {
   );
 }
 
+function formatDist(m) {
+  if (m == null || !Number.isFinite(m)) return '—';
+  if (m < 1000) return `${m.toFixed(0)}m`;
+  return `${(m / 1000).toFixed(2)}km`;
+}
+
+// STATUSTEXT severities below this trigger a HUD toast. MAV_SEVERITY: 0=EMERGENCY … 7=DEBUG.
+// 4 = WARNING — surfaces autopilot pre-arm refusals, GPS-glitch, EKF failsafe, etc.
+const STATUSTEXT_TOAST_SEVERITY = 4;
+const STATUSTEXT_TOAST_LIFETIME_MS = 6000;
+
+function StatusTextToast({ messages }) {
+  // Pick the most recent message that crosses the severity threshold within the toast lifetime.
+  // We dedupe on (timestamp, text) so the same toast doesn't re-appear after re-render.
+  const [shown, setShown] = useState(null);
+  const lastShownKeyRef = useRef(null);
+
+  useEffect(() => {
+    if (!Array.isArray(messages) || messages.length === 0) return undefined;
+    let latest = null;
+    for (const m of messages) {
+      if ((m?.severity ?? 7) > STATUSTEXT_TOAST_SEVERITY) continue;
+      if (!latest || (m.timestamp ?? 0) > (latest.timestamp ?? 0)) latest = m;
+    }
+    if (!latest) return undefined;
+    const ageMs = (Date.now() / 1000 - (latest.timestamp || 0)) * 1000;
+    if (ageMs > STATUSTEXT_TOAST_LIFETIME_MS) return undefined;
+    const key = `${latest.timestamp}:${latest.text}`;
+    if (lastShownKeyRef.current === key) return undefined;
+    lastShownKeyRef.current = key;
+    setShown(latest);
+    const t = setTimeout(() => setShown(null), STATUSTEXT_TOAST_LIFETIME_MS - ageMs);
+    return () => clearTimeout(t);
+  }, [messages]);
+
+  if (!shown) return null;
+  const sev = shown.severity ?? 6;
+  // MAV_SEVERITY: 0 EMERGENCY · 1 ALERT · 2 CRITICAL · 3 ERROR · 4 WARNING · 5 NOTICE · 6 INFO · 7 DEBUG
+  const color = sev <= 2 ? '#ef4444' : sev === 3 ? '#f97316' : '#f59e0b';
+  const label = ['EMERG', 'ALERT', 'CRIT', 'ERROR', 'WARN', 'NOTICE', 'INFO', 'DEBUG'][sev] || 'MSG';
+  return (
+    <div className="hud2-statustext-toast" style={{
+      position: 'absolute',
+      left: '50%',
+      bottom: 72,
+      transform: 'translateX(-50%)',
+      maxWidth: '92%',
+      padding: '6px 12px',
+      background: 'rgba(15,23,42,0.92)',
+      border: `1px solid ${color}`,
+      borderRadius: 4,
+      color: '#e2e8f0',
+      fontSize: 12,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      lineHeight: 1.3,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      zIndex: 20,
+      pointerEvents: 'none',
+    }}>
+      <span style={{ color, fontWeight: 700, marginRight: 8 }}>{label}</span>
+      {shown.text}
+    </div>
+  );
+}
+
 // ─── Main HUD Component ────────────────────────────────────────────────────────
-const AdvancedHUD = ({ vehicleState }) => {
+const AdvancedHUD = ({ vehicleState, missionTotal }) => {
   const v = vehicleState;
 
   // Attitude
@@ -321,6 +431,43 @@ const AdvancedHUD = ({ vehicleState }) => {
   }
   const originDriftWarn = originDriftM != null && originDriftM > 10;
 
+  // Mission progress — MISSION_CURRENT (current_seq) vs planned total.
+  const missionSeq = Number(v?.mission?.current_seq ?? -1);
+  const missionTotalN = Number.isFinite(Number(missionTotal)) ? Number(missionTotal) : 0;
+  const missionActive = missionSeq >= 0 && missionTotalN > 0;
+  const missionProgressText = missionActive
+    ? `WP ${missionSeq + 1}/${missionTotalN}`
+    : missionSeq >= 0
+      ? `WP ${missionSeq + 1}`
+      : null;
+
+  // WP distance — NAV_CONTROLLER_OUTPUT.wp_dist. Backend uses -1 as "no value".
+  const wpDistRaw = Number(v?.navigation?.wp_dist);
+  const wpDistM = Number.isFinite(wpDistRaw) && wpDistRaw >= 0 ? wpDistRaw : null;
+
+  // Distance-to-home — derived from HOME_POSITION + GLOBAL_POSITION_INT.
+  const pos = v?.position;
+  const homeDistM = (home?.valid && pos)
+    ? haversineM(pos.lat, pos.lng, home.lat, home.lng)
+    : null;
+
+  // Pre-arm summary — derived from SYS_STATUS sensors bitmasks. We only flag a sensor as failing
+  // if it is BOTH present and enabled but NOT healthy. Matches Mission Planner's PreArm logic.
+  const sensorsPresent = Number(v?.status?.sensors_present ?? 0);
+  const sensorsEnabled = Number(v?.status?.sensors_enabled ?? 0);
+  const sensorsHealth  = Number(v?.status?.sensors_health  ?? 0);
+  const sensorActiveMask = sensorsPresent & sensorsEnabled;
+  const sensorFailingMask = sensorActiveMask & ~sensorsHealth;
+  const failingSensors = [];
+  if (sensorFailingMask) {
+    for (const [bit, label] of MAV_SYS_STATUS_SENSORS) {
+      if (sensorFailingMask & bit) failingSensors.push(label);
+      if (failingSensors.length >= 4) break;
+    }
+  }
+  // Pre-arm overlay only matters while disarmed. When armed, we trust the autopilot.
+  const showPreArm = !isArmed && (failingSensors.length > 0);
+
   // GPS label
   const gpsText = (() => {
     if (gpsfix >= 6) return `RTK Fixed ${sats}`;
@@ -383,6 +530,63 @@ const AdvancedHUD = ({ vehicleState }) => {
           {failsafe && (
             <div className="hud2-failsafe-overlay">⚠ FAILSAFE</div>
           )}
+
+          {/* Mission / WP / Home info column — top-right of horizon clip, MP style. */}
+          {(missionProgressText || wpDistM != null || homeDistM != null) && (
+            <div className="hud2-info-col" style={{
+              position: 'absolute',
+              top: 4,
+              right: 4,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 2,
+              padding: '4px 8px',
+              background: 'rgba(15,23,42,0.55)',
+              border: '1px solid rgba(148,163,184,0.25)',
+              borderRadius: 3,
+              color: '#e2e8f0',
+              fontSize: 11,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              lineHeight: 1.25,
+              pointerEvents: 'none',
+              zIndex: 5,
+            }}>
+              {missionProgressText && (
+                <div style={{ color: '#60a5fa', fontWeight: 700 }}>{missionProgressText}</div>
+              )}
+              {wpDistM != null && (
+                <div>WP <span style={{ color: '#facc15' }}>{formatDist(wpDistM)}</span></div>
+              )}
+              {homeDistM != null && (
+                <div>HOME <span style={{ color: '#22c55e' }}>{formatDist(homeDistM)}</span></div>
+              )}
+            </div>
+          )}
+
+          {/* Pre-arm summary — bottom-left of horizon clip when disarmed and sensors fail health. */}
+          {showPreArm && (
+            <div className="hud2-prearm-overlay" style={{
+              position: 'absolute',
+              left: 6,
+              bottom: 6,
+              maxWidth: '60%',
+              padding: '3px 8px',
+              background: 'rgba(239,68,68,0.85)',
+              border: '1px solid #b91c1c',
+              borderRadius: 3,
+              color: '#fff',
+              fontSize: 11,
+              fontWeight: 700,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              letterSpacing: 0.4,
+              pointerEvents: 'none',
+              zIndex: 6,
+            }}
+              title={`Sensors not healthy: ${failingSensors.join(', ')}`}>
+              PREARM: {failingSensors.join(' · ')}
+            </div>
+          )}
         </div>
 
         {/* Altitude tape — right */}
@@ -430,6 +634,9 @@ const AdvancedHUD = ({ vehicleState }) => {
           </>
         )}
       </div>
+
+      {/* STATUSTEXT toast — autopilot warnings (sev ≤ 4) surfaced briefly over the HUD. */}
+      <StatusTextToast messages={v?.status_messages} />
     </div>
   );
 };

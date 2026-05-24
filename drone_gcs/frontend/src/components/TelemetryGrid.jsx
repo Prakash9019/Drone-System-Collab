@@ -7,6 +7,7 @@ import PreFlightTab from './tabs/PreFlightTab';
 import ServoTab from './tabs/ServoTab';
 import GaugesTab from './tabs/GaugesTab';
 import AuxTab from './tabs/AuxTab';
+import ReplayTab from './tabs/ReplayTab';
 
 const TABS = [
   { id: 'Quick',    label: 'Quick' },
@@ -17,6 +18,7 @@ const TABS = [
   { id: 'Status',   label: 'Status' },
   { id: 'Servo',    label: 'Servo' },
   { id: 'AUX',      label: 'AUX' },
+  { id: 'Replay',   label: 'Replay' },
 ];
 
 const TelemetryGrid = ({ vehicleState }) => {
@@ -32,6 +34,7 @@ const TelemetryGrid = ({ vehicleState }) => {
       case 'Status':    return <StatusTab vehicleState={vehicleState} />;
       case 'Servo':     return <ServoTab vehicleState={vehicleState} />;
       case 'AUX':       return <AuxTab vehicleState={vehicleState} />;
+      case 'Replay':    return <ReplayTab />;
       default:          return null;
     }
   };

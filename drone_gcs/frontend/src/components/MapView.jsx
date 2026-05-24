@@ -4,21 +4,16 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
-import useMissionStore, { FENCE_CMD_INCLUSION, FENCE_CMD_EXCLUSION } from '../store/useMissionStore';
+import useMissionStore from '../store/useMissionStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
+import { deriveHeadingDeg, buildFenceGroups, createHomeMarker, isValidHome } from '../utils/mapShared';
 
 const API_URL = 'http://localhost:8080';
 
 const DEFAULT_FALLBACK = { lng: 78.4867, lat: 17.385 }; /* Hyderabad-ish if nothing else */
 
-function headingDegFromVehicle(v) {
-  const h = Number(v?.velocity?.heading);
-  if (Number.isFinite(h) && h >= 0 && h <= 360) return h;
-  const yaw = v?.attitude?.yaw;
-  if (yaw == null || Number.isNaN(Number(yaw))) return 0;
-  const deg = ((Number(yaw) * 180) / Math.PI) % 360;
-  return deg < 0 ? deg + 360 : deg;
-}
+// Thin wrapper kept so existing call-sites don't churn — heading derivation lives in mapShared.
+const headingDegFromVehicle = deriveHeadingDeg;
 
 // Mission Planner–style quadcopter top-down icon. Body + 4 motor pods + forward arrow.
 // Drawn pointing north (0°); maplibre rotates with setRotation(heading).
@@ -397,27 +392,15 @@ const MapView = () => {
   useEffect(() => {
     if (!map.current) return;
     const h = vehicle?.home;
-    const valid = h?.valid && h.lat !== 0 && h.lng !== 0 && Math.abs(h.lat) <= 90 && Math.abs(h.lng) <= 180;
-
-    if (!valid) {
+    if (!isValidHome(h)) {
       if (homeMarker.current) {
         homeMarker.current.remove();
         homeMarker.current = null;
       }
       return;
     }
-
     if (!homeMarker.current) {
-      // House-shape SVG, smaller than the vehicle, so the drone is always the prominent marker.
-      const el = document.createElement('div');
-      el.style.cssText = 'width:22px;height:22px;display:flex;align-items:center;justify-content:center;pointer-events:none;opacity:0.92;';
-      el.innerHTML =
-        '<svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">'
-          + '<path d="M3 11 L11 3 L19 11 L19 19 L13 19 L13 14 L9 14 L9 19 L3 19 Z" fill="#16a34a" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>'
-          + '<rect x="9.5" y="14" width="3" height="5" fill="#052e16"/>'
-        + '</svg>';
-      el.title = `Home (${h.lat?.toFixed(6)}, ${h.lng?.toFixed(6)})`;
-      homeMarker.current = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([h.lng, h.lat]).addTo(map.current);
+      homeMarker.current = createHomeMarker(map.current, h);
     } else {
       homeMarker.current.setLngLat([h.lng, h.lat]);
     }
@@ -512,18 +495,8 @@ const MapView = () => {
       src.setData({ type: 'FeatureCollection', features: [] });
       return;
     }
-    // Build polygon groups matching MP Fence.LocationToFence grouping logic
-    const groups = [];
-    let current = null;
-    verts.forEach(wp => {
-      const type = Number(wp.command) === FENCE_CMD_EXCLUSION ? 'exclusion' : 'inclusion';
-      if (!current || current.type !== type) {
-        if (current) groups.push(current);
-        current = { type, coords: [] };
-      }
-      current.coords.push([wp.lng, wp.lat]);
-    });
-    if (current) groups.push(current);
+    // Polygon groups: shared helper — same logic backs the Plan tab map.
+    const groups = buildFenceGroups(verts);
 
     const features = groups.flatMap(g => {
       if (g.coords.length < 3) return [];

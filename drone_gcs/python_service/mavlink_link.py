@@ -38,8 +38,24 @@ class LinkManager:
         self.heartbeat_timeout_s = 3.0
         self.heartbeat_required_for_connect = 2
         self.serial_settle_s = 0.6
-        self.reconnect_retry_delay_s = 1.0
+        # Reconnect policy — exponential backoff. Mission Planner doubles the wait between attempts
+        # so a flapping link doesn't hammer the serial driver / radio. Cap at 30 s to keep humans
+        # in the loop while still letting a slow USB cable settle.
+        self.reconnect_retry_delay_s = 1.0       # base / floor
+        self.reconnect_retry_delay_max_s = 30.0  # ceiling
+        self.reconnect_max_attempts = 0          # 0 = unlimited (Mission Planner default)
+        self._reconnect_attempts = 0
         self._last_reconnect_attempt = 0.0
+        self._next_reconnect_eta = 0.0
+        # Last connect failure reason. None when not in an error state. One of:
+        #   "auto_detect_failed", "transport_error", "no_heartbeat", "handshake_timeout",
+        #   "max_attempts_reached", "user_disconnect", "unknown".
+        self.last_error_reason: Optional[str] = None
+        self.last_error_detail: Optional[str] = None
+        # Rolling history of state transitions (newest last) — surfaced in /connection/status so the
+        # operator can see "what happened in the last 10s" without tailing logs.
+        self._state_history: List[Dict[str, Any]] = []
+        self._state_history_max = 20
         self._pps_window_start = time.time()
         self._pps_window_packets = 0
         self.message_counts: Dict[str, int] = {}
@@ -67,7 +83,11 @@ class LinkManager:
                         self.baudrate = int(parts[1])
                 else:
                     logger.error("Auto-detection failed. Cannot connect.")
-                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    self._set_connection_state(
+                        ConnectionState.DISCONNECTED,
+                        reason="auto_detect_failed",
+                        detail="No MAVLink device discovered during baud sweep.",
+                    )
                     return False
 
             logger.info(f"Connecting to {self.connection_string} at baud {self.baudrate}")
@@ -88,7 +108,11 @@ class LinkManager:
                 if not session_ok:
                     logger.error("Failed to validate MAVLink session during connect.")
                     await self._reset_transport()
-                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    self._set_connection_state(
+                        ConnectionState.DISCONNECTED,
+                        reason="no_heartbeat",
+                        detail=f"No HEARTBEAT after {self.connect_timeout_s:.0f}s on {self.connection_string}",
+                    )
                     return False
 
                 self._set_connection_state(ConnectionState.CONNECTED)
@@ -98,7 +122,11 @@ class LinkManager:
             except Exception as e:
                 logger.error(f"Connection failed: {e}")
                 await self._reset_transport()
-                self._set_connection_state(ConnectionState.DISCONNECTED)
+                self._set_connection_state(
+                    ConnectionState.DISCONNECTED,
+                    reason="transport_error",
+                    detail=str(e),
+                )
                 return False
 
     async def _open_transport_with_stabilization(self):
@@ -132,10 +160,51 @@ class LinkManager:
                 await asyncio.sleep(0.4)
         raise RuntimeError(f"Unable to open transport after retries: {last_error}")
 
-    def _set_connection_state(self, state: ConnectionState):
+    def _set_connection_state(self, state: ConnectionState, reason: Optional[str] = None, detail: Optional[str] = None):
+        prev = self.connection_state
         self.connection_state = state
         if self.primary_sysid in self.vehicles:
             self.vehicles[self.primary_sysid].connection_state = state
+        # Track diagnostic context on every state transition so the UI can show "why".
+        if state == ConnectionState.CONNECTED:
+            self.last_error_reason = None
+            self.last_error_detail = None
+            self._reconnect_attempts = 0
+            self._next_reconnect_eta = 0.0
+        elif reason is not None:
+            self.last_error_reason = reason
+            self.last_error_detail = detail
+        if prev != state:
+            self._state_history.append({
+                "at": time.time(),
+                "from": prev.value if hasattr(prev, "value") else str(prev),
+                "to": state.value if hasattr(state, "value") else str(state),
+                "reason": reason,
+                "detail": detail,
+            })
+            if len(self._state_history) > self._state_history_max:
+                self._state_history = self._state_history[-self._state_history_max:]
+
+    def _next_backoff_delay(self) -> float:
+        """Exponential backoff with jitter-free cap. attempt 1 → base, attempt N → min(base*2^(N-1), max)."""
+        if self._reconnect_attempts <= 0:
+            return self.reconnect_retry_delay_s
+        delay = self.reconnect_retry_delay_s * (2 ** (self._reconnect_attempts - 1))
+        return min(delay, self.reconnect_retry_delay_max_s)
+
+    def connection_diagnostics(self) -> Dict[str, Any]:
+        """Snapshot of reconnect state suitable for /connection/status."""
+        now = time.time()
+        return {
+            "reconnect_attempts": self._reconnect_attempts,
+            "next_reconnect_in_s": max(0.0, self._next_reconnect_eta - now) if self._next_reconnect_eta else 0.0,
+            "reconnect_retry_delay_s": self._next_backoff_delay(),
+            "last_error_reason": self.last_error_reason,
+            "last_error_detail": self.last_error_detail,
+            "max_attempts": self.reconnect_max_attempts,
+            "heartbeat_age_s": (now - self.last_heartbeat_time) if self.last_heartbeat_time else None,
+            "state_history": list(self._state_history),
+        }
 
     def _ensure_vehicle(self, sysid: int, compid: int):
         if sysid not in self.vehicles:
@@ -425,17 +494,44 @@ class LinkManager:
     async def _attempt_reconnect(self):
         if self._connect_lock.locked():
             return
-        if (time.time() - self._last_reconnect_attempt) < self.reconnect_retry_delay_s:
+        # Honour exponential backoff window. _next_reconnect_eta is the absolute time the next
+        # attempt is allowed; the keep-alive loop polls us at 1 Hz and bails until then.
+        now = time.time()
+        if self._next_reconnect_eta and now < self._next_reconnect_eta:
             return
-        self._last_reconnect_attempt = time.time()
+        # Respect optional max-attempt cap. 0 == unlimited (the Mission Planner default behaviour).
+        if self.reconnect_max_attempts and self._reconnect_attempts >= self.reconnect_max_attempts:
+            if self.last_error_reason != "max_attempts_reached":
+                logger.error(
+                    "Reconnect gave up after %d attempts.", self._reconnect_attempts
+                )
+                self._set_connection_state(
+                    ConnectionState.DISCONNECTED,
+                    reason="max_attempts_reached",
+                    detail=f"Stopped retrying after {self._reconnect_attempts} attempts.",
+                )
+            return
+
+        self._reconnect_attempts += 1
+        delay = self._next_backoff_delay()
+        self._last_reconnect_attempt = now
+        self._next_reconnect_eta = now + delay
 
         self._set_connection_state(ConnectionState.RECONNECTING)
-        logger.info("Attempting MAVLink reconnect...")
+        logger.info(
+            "Attempting MAVLink reconnect (#%d, next backoff %.1fs)...",
+            self._reconnect_attempts, delay,
+        )
 
         if self.original_connection_string.lower() == "auto":
             detected = await auto_detect_connection()
             if not detected:
                 logger.warning("Auto reconnect failed: no device detected.")
+                self._set_connection_state(
+                    ConnectionState.HEARTBEAT_LOST,
+                    reason="auto_detect_failed",
+                    detail="No device on baud sweep during reconnect.",
+                )
                 return
             parts = detected.split(":")
             self.connection_string = parts[0]
@@ -449,7 +545,11 @@ class LinkManager:
             self._set_connection_state(ConnectionState.WAITING_FOR_HEARTBEAT)
             session_ok = await self._bootstrap_session()
             if not session_ok:
-                self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
+                self._set_connection_state(
+                    ConnectionState.HEARTBEAT_LOST,
+                    reason="no_heartbeat",
+                    detail=f"No HEARTBEAT on retry #{self._reconnect_attempts}.",
+                )
                 return
 
             self._streams_sent.clear()
@@ -458,7 +558,11 @@ class LinkManager:
             logger.info("Reconnect successful. Streams renegotiated.")
         except Exception as e:
             logger.error(f"Reconnect failed: {e}")
-            self._set_connection_state(ConnectionState.HEARTBEAT_LOST)
+            self._set_connection_state(
+                ConnectionState.HEARTBEAT_LOST,
+                reason="transport_error",
+                detail=str(e),
+            )
 
     async def send_command(
         self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3
@@ -620,7 +724,13 @@ class LinkManager:
     async def close(self):
         logger.info("LinkManager initiating shutdown...")
         self.running = False
-        self._set_connection_state(ConnectionState.DISCONNECTED)
+        self._reconnect_attempts = 0
+        self._next_reconnect_eta = 0.0
+        self._set_connection_state(
+            ConnectionState.DISCONNECTED,
+            reason="user_disconnect",
+            detail="Operator-initiated disconnect.",
+        )
         
         # Cancel all running tasks
         for task in self._tasks:

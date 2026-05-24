@@ -110,6 +110,25 @@ class HomePosition:
     valid: bool = False
 
 @dataclass
+class FenceStatus:
+    """Mirrors the MAVLink FENCE_STATUS message.
+    breach_status: 0 = no breach, 1 = breach active
+    breach_type:   0=NONE 1=MINALT 2=MAXALT 3=BOUNDARY (polygon or circle)
+    breach_count:  total breaches since boot
+    breach_time:   ms since boot of last breach
+    breach_mitigation: action taken (0=none, 1=RTL, 2=Land, 3=Brake, 4=SmartRTL)
+    last_breach_text: most recent fence-related STATUSTEXT (filled by the STATUSTEXT handler)
+    valid:         set True once we've seen at least one FENCE_STATUS message."""
+    breach_status: int = 0
+    breach_type: int = 0
+    breach_count: int = 0
+    breach_time: int = 0
+    breach_mitigation: int = 0
+    last_breach_text: str = ""
+    last_breach_text_ts: float = 0.0
+    valid: bool = False
+
+@dataclass
 class EKFOrigin:
     """EKF origin from MAVLink GPS_GLOBAL_ORIGIN. Mission Planner anchors mission math here.
     Diverging from HOME_POSITION is a known cause of "drone appears at wrong place" symptoms."""

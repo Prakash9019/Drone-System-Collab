@@ -117,4 +117,4 @@ Part 1 — Draw and Upload the Fence
   6. Enable ✓ → Action: RTL → Alt Max: 120 → click Apply Fence Config
   7. Switch back to MISSION → plan your mission as before
   8. ARM → Set AUTO → Start Mission
-
+  

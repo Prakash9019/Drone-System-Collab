@@ -8,6 +8,8 @@ import WaypointTable from '../components/WaypointTable';
 import SurveyGridPanel from '../components/SurveyGridPanel';
 import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { pointInPolygon, fencePolygonsFromWaypoints, haversineM } from '../utils/geometry';
+import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { pointInPolygon, fencePolygonsFromWaypoints, haversineM } from '../utils/geometry';
 
 const API_URL = 'http://localhost:8080';
 
@@ -456,6 +458,7 @@ const FlightPlanner = () => {
             alt_min: Number(res.data?.alt_min ?? 0),
             margin: Number(res.data?.margin ?? 2),
             fence_type: Number(res.data?.fence_type ?? 7),
+            fence_type: Number(res.data?.fence_type ?? 7),
           });
         }
       } catch { setFenceStatus(null); }
@@ -485,6 +488,7 @@ const FlightPlanner = () => {
         alt_max: Number(res.data?.alt_max ?? 120),
         alt_min: Number(res.data?.alt_min ?? 0),
         margin: Number(res.data?.margin ?? 2),
+        fence_type: Number(res.data?.fence_type ?? 7),
         fence_type: Number(res.data?.fence_type ?? 7),
       });
     } catch (err) {
@@ -593,18 +597,18 @@ const FlightPlanner = () => {
   const preflightChecks = useMemo(() => {
     if (missionType !== 'MISSION') return [];
     const checks = [
-      { label: 'Connected',    ok: !!vehicle?.status },
-      { label: 'GPS lock',     ok: Number(vehicle?.status?.gps_fix ?? 0) >= 3 },
-      { label: 'Home set',     ok: !!vehicle?.home?.valid },
-      { label: 'TAKEOFF cmd',  ok: hasTakeoffCmd },
-      { label: 'Waypoints',    ok: waypoints.length > 0 },
-      { label: 'Armed',        ok: !!vehicle?.status?.armed },
-      { label: 'AUTO mode',    ok: inAutoMode },
+      { label: 'Connected', ok: !!vehicle?.status },
+      { label: 'GPS lock', ok: Number(vehicle?.status?.gps_fix ?? 0) >= 3 },
+      { label: 'Home set', ok: !!vehicle?.home?.valid },
+      { label: 'TAKEOFF cmd', ok: hasTakeoffCmd },
+      { label: 'Waypoints', ok: waypoints.length > 0 },
+      { label: 'Armed', ok: !!vehicle?.status?.armed },
+      { label: 'AUTO mode', ok: inAutoMode },
     ];
     if (missionVsFence.hasFence) {
-      checks.push({ label: 'HOME in fence',   ok: missionVsFence.homeInside !== false && !missionVsFence.homeInExcl });
-      checks.push({ label: 'WPs in fence',    ok: missionVsFence.wpsBad.length === 0 && missionVsFence.wpsExcl.length === 0 });
-      checks.push({ label: 'Alt < AltMax',    ok: missionVsFence.altMaxBad.length === 0 });
+      checks.push({ label: 'HOME in fence', ok: missionVsFence.homeInside !== false && !missionVsFence.homeInExcl });
+      checks.push({ label: 'WPs in fence', ok: missionVsFence.wpsBad.length === 0 && missionVsFence.wpsExcl.length === 0 });
+      checks.push({ label: 'Alt < AltMax', ok: missionVsFence.altMaxBad.length === 0 });
     }
     return checks;
   }, [missionType, vehicle, hasTakeoffCmd, waypoints.length, inAutoMode, missionVsFence]);
@@ -686,10 +690,10 @@ const FlightPlanner = () => {
               {' '}| {fencePolygons.length === 0
                 ? 'No polygons'
                 : fencePolygons.map((p, i) => {
-                    const label = p.cmd === FENCE_CMD_EXCLUSION ? 'Excl' : 'Incl';
-                    const warn = p.items.length < 3 ? '⚠' : '';
-                    return `${warn}${label}(${p.items.length}pts)`;
-                  }).join(' + ')
+                  const label = p.cmd === FENCE_CMD_EXCLUSION ? 'Excl' : 'Incl';
+                  const warn = p.items.length < 3 ? '⚠' : '';
+                  return `${warn}${label}(${p.items.length}pts)`;
+                }).join(' + ')
               }
             </span>
           </span>

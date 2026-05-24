@@ -81,6 +81,81 @@ app.get('/api/connection/ports', async (req, res) => {
   }
 });
 
+// Telemetry replay — record / playback proxies.
+// The Python service exposes /replay/* directly; the frontend talks to the Node gateway only,
+// so we forward verbatim. State lives in replay_manager.py (one recorder + one player per process).
+app.post('/api/replay/record/start', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/record/start`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start recording', details: err.message });
+  }
+});
+
+app.post('/api/replay/record/stop', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/record/stop`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop recording', details: err.message });
+  }
+});
+
+app.get('/api/replay/sessions', async (req, res) => {
+  try {
+    const r = await axios.get(`${PYTHON_API_URL}/replay/sessions`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to list replay sessions', details: err.message });
+  }
+});
+
+app.post('/api/replay/playback/start', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/playback/start`, req.body || {});
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start playback', details: err.message });
+  }
+});
+
+app.post('/api/replay/playback/stop', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/playback/stop`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop playback', details: err.message });
+  }
+});
+
+app.post('/api/replay/playback/pause', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/playback/pause`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to pause playback', details: err.message });
+  }
+});
+
+app.post('/api/replay/playback/resume', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/playback/resume`);
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to resume playback', details: err.message });
+  }
+});
+
+app.post('/api/replay/playback/seek', async (req, res) => {
+  try {
+    const r = await axios.post(`${PYTHON_API_URL}/replay/playback/seek`, req.body || {});
+    res.json(r.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to seek playback', details: err.message });
+  }
+});
+
 // ZeroMQ Subscriber logic
 async function runZmqSubscriber() {
   const sock = new zmq.Subscriber();

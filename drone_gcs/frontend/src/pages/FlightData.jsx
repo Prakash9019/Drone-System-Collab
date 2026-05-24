@@ -43,6 +43,8 @@ const FlightData = () => {
   const plannedWaypoints = useMissionStore((s) => s.waypoints);
   const missionSavedSlot = useMissionStore((s) => s._missionSaved);
   const missionSyncStatus = useTelemetryStore((s) => s.missionSyncStatus);
+  const connectionDiagnostics = useTelemetryStore((s) => s.connectionDiagnostics);
+  const pollConnectionStatus = useTelemetryStore((s) => s.pollConnectionStatus);
 
   const vehicle = useTelemetryStore(selectPrimaryVehicle);
   const connState = connectionState || vehicle?.connection_state || 'DISCONNECTED';
@@ -114,6 +116,16 @@ const FlightData = () => {
     const t = setInterval(run, 5000);
     return () => clearInterval(t);
   }, [isActive]);
+
+  // Poll /connection/status for diagnostics (reconnect attempts, backoff ETA, last error reason)
+  // any time we're not in a steady CONNECTED state. The WebSocket carries telemetry but not these
+  // diagnostic fields, which only live in the FastAPI snapshot.
+  useEffect(() => {
+    if (connState === 'CONNECTED' || connState === 'ACTIVE') return undefined;
+    pollConnectionStatus();
+    const t = setInterval(() => pollConnectionStatus(), 1500);
+    return () => clearInterval(t);
+  }, [connState, pollConnectionStatus]);
 
   const modeOptions = useMemo(() => {
     const cur = vehicle?.status?.mode;
@@ -382,13 +394,55 @@ const FlightData = () => {
         </div>
       )}
 
+      {/* Reconnect / failure diagnostics — only shown while not in a steady CONNECTED state and
+          there's something useful to display. Mirrors Mission Planner's "connection lost — retrying"
+          status text but with structured reason codes. */}
+      {(connState === 'RECONNECTING' || connState === 'HEARTBEAT_LOST' || connectionDiagnostics?.last_error_reason)
+        && !(connState === 'CONNECTED' || connState === 'ACTIVE') && (
+        <div
+          role="status"
+          style={{
+            padding: '4px 16px',
+            fontSize: 12,
+            color: '#fca5a5',
+            background: '#1f1010',
+            borderBottom: '1px solid #5b1a1a',
+            display: 'flex',
+            gap: 14,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+          }}
+        >
+          {connectionDiagnostics?.last_error_reason && (
+            <span><b>Reason:</b> {connectionDiagnostics.last_error_reason}
+              {connectionDiagnostics.last_error_detail ? ` — ${connectionDiagnostics.last_error_detail}` : ''}
+            </span>
+          )}
+          {connectionDiagnostics?.reconnect_attempts > 0 && (
+            <span><b>Attempts:</b> {connectionDiagnostics.reconnect_attempts}</span>
+          )}
+          {connectionDiagnostics?.next_reconnect_in_s > 0 && (
+            <span><b>Next retry in:</b> {connectionDiagnostics.next_reconnect_in_s.toFixed(1)}s</span>
+          )}
+          {connectionDiagnostics?.reconnect_retry_delay_s > 0 && (
+            <span title="Exponential backoff — doubles each attempt up to a cap.">
+              <b>Backoff:</b> {connectionDiagnostics.reconnect_retry_delay_s.toFixed(1)}s
+            </span>
+          )}
+        </div>
+      )}
+
       {/* ── Main Layout ──────────────────────────────────────────────── */}
       <div className="mp-layout" style={{ flex: 1 }}>
 
         {/* Left Sidebar */}
         <div className="mp-sidebar">
           <div className="mp-hud-section">
-            <AdvancedHUD vehicleState={vehicle} operational={operational} />
+            <AdvancedHUD
+              vehicleState={vehicle}
+              operational={operational}
+              missionTotal={missionPlannedTotal || missionSavedSlot?.length || plannedWaypoints?.length || 0}
+            />
           </div>
           <div className="mp-data-section">
             <TelemetryGrid vehicleState={vehicle} />

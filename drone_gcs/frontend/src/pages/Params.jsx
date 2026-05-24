@@ -50,6 +50,10 @@ const Params = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   const [editValues, setEditValues] = useState({});
+  // Per-key save lifecycle. Mission Planner shows green/red flashes on its grid; we surface
+  // pending → ok / error inline so the user doesn't have to read the toast bar to see ACK status.
+  const [saveStatus, setSaveStatus] = useState({}); // { [paramId]: { state, error?, at } }
+  const [savingAll, setSavingAll] = useState(false);
   const [category, setCategory] = useState('ALL');
   const [sortBy, setSortBy] = useState('name');
   const [rowStart, setRowStart] = useState(0);
@@ -57,6 +61,12 @@ const Params = () => {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [twoParamResult, setTwoParamResult] = useState(null);
+
+  const dirtyKeys = useMemo(
+    () => Object.keys(editValues).filter((k) => editValues[k] !== undefined && editValues[k] !== ''),
+    [editValues]
+  );
+  const dirtyCount = dirtyKeys.length;
 
   const importRef = useRef(null);
   const importParamRef = useRef(null);
@@ -95,21 +105,60 @@ const Params = () => {
 
   const handleSave = async (paramId) => {
     const val = editValues[paramId];
-    if (val === undefined) return;
+    if (val === undefined || val === '') return;
+    setSaveStatus((prev) => ({ ...prev, [paramId]: { state: 'pending', at: Date.now() } }));
     try {
-      await axios.post('http://localhost:8080/api/parameters/set', {
+      const res = await axios.post('http://localhost:8080/api/parameters/set', {
         param_id: paramId,
         param_value: parseFloat(val),
       });
-      setEditValues((prev) => {
-        const next = { ...prev };
-        delete next[paramId];
-        return next;
-      });
-      setOpMsg(`${paramId} set to ${val}`);
+      // Backend returns {status, accepted, mav_result_text, ...} via command_manager. Treat anything
+      // not explicitly accepted=false as success — older builds reply with {status:"success"}.
+      const ok = res?.data?.accepted !== false;
+      if (ok) {
+        setEditValues((prev) => {
+          const next = { ...prev };
+          delete next[paramId];
+          return next;
+        });
+        setSaveStatus((prev) => ({ ...prev, [paramId]: { state: 'ok', at: Date.now() } }));
+        setOpMsg(`${paramId} set to ${val}`);
+      } else {
+        const text = res?.data?.mav_result_text || res?.data?.error || 'rejected';
+        setSaveStatus((prev) => ({ ...prev, [paramId]: { state: 'error', error: text, at: Date.now() } }));
+        setOpMsg(`Failed to set ${paramId}: ${text}`);
+      }
     } catch (err) {
-      setOpMsg(`Failed to set ${paramId}: ${err.response?.data?.detail || err.message}`);
+      const text = err.response?.data?.detail || err.response?.data?.error || err.message;
+      setSaveStatus((prev) => ({ ...prev, [paramId]: { state: 'error', error: text, at: Date.now() } }));
+      setOpMsg(`Failed to set ${paramId}: ${text}`);
     }
+  };
+
+  const handleSaveAll = async () => {
+    if (savingAll || dirtyKeys.length === 0) return;
+    setSavingAll(true);
+    let ok = 0;
+    let failed = 0;
+    // Mission Planner writes parameters serially over MAVLink to avoid PARAM_SET → PARAM_VALUE
+    // ACK collisions. Match that — no Promise.all.
+    for (const key of dirtyKeys) {
+      try {
+        await handleSave(key);
+        // handleSave updates saveStatus; read it back to decide ok vs failed.
+        // We re-read editValues — successful save deletes the entry.
+        if (editValues[key] === undefined) ok += 1; else failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setSavingAll(false);
+    setOpMsg(`Batch save: ok=${ok}, failed=${failed}`);
+  };
+
+  const handleRevertAll = () => {
+    setEditValues({});
+    setOpMsg(`Reverted ${dirtyKeys.length} unsaved edits`);
   };
 
   const handleExport = async () => {
@@ -329,6 +378,22 @@ const Params = () => {
             <input type="file" accept=".param,.txt" style={{ display: 'none' }} onChange={handleCompareParam} disabled={isDisconnected} />
           </label>
           <button
+            className="btn-toolbar primary"
+            onClick={handleSaveAll}
+            disabled={isDisconnected || dirtyCount === 0 || savingAll}
+            title="Write all unsaved edits to the vehicle (serial PARAM_SET, ACK per parameter)"
+          >
+            <Save size={14} /> Save All ({dirtyCount})
+          </button>
+          <button
+            className="btn-toolbar"
+            onClick={handleRevertAll}
+            disabled={dirtyCount === 0 || savingAll}
+            title="Discard all unsaved edits"
+          >
+            Revert
+          </button>
+          <button
             className="btn-toolbar danger"
             onClick={() => setShowResetConfirm(true)}
             disabled={isDisconnected || resetBusy}
@@ -407,51 +472,99 @@ const Params = () => {
                 </td>
               </tr>
             ) : (
-              visibleParams.map(([key, val, m]) => (
-                <tr key={key}>
-                  <td style={{ textAlign: 'center' }}>
-                    <button
-                      type="button"
-                      className="btn-icon"
-                      onClick={() => toggleFavorite(key)}
-                      title={favorites.has(key) ? 'Unpin favorite' : 'Pin favorite'}
-                    >
-                      <span style={{ color: favorites.has(key) ? '#fbbf24' : '#64748b' }}>
-                        {favorites.has(key) ? '★' : '☆'}
-                      </span>
-                    </button>
-                  </td>
-                  <td style={{ fontWeight: 'bold' }}>{key}</td>
-                  <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{m.units != null && m.units !== '' ? m.units : '—'}</td>
-                  <td style={{ fontSize: 12, maxWidth: 260, color: 'var(--text-secondary)' }} title={m.description}>{m.description || '—'}</td>
-                  <td style={{ fontFamily: 'monospace' }}>{val}</td>
-                  <td>
-                    <input
-                      type="number"
-                      className="alt-input"
-                      value={editValues[key] !== undefined ? editValues[key] : ''}
-                      onChange={(e) => setEditValues({ ...editValues, [key]: e.target.value })}
-                      placeholder={String(val)}
-                      disabled={isDisconnected}
-                      style={{
-                        width: '120px',
-                        backgroundColor: editValues[key] !== undefined ? 'rgba(245,158,11,0.15)' : undefined,
-                        borderColor: editValues[key] !== undefined ? 'var(--accent-yellow)' : 'var(--border-color)',
-                      }}
-                    />
-                  </td>
-                  <td>
-                    <button
-                      className="btn-toolbar primary"
-                      style={{ padding: '4px 12px' }}
-                      onClick={() => handleSave(key)}
-                      disabled={editValues[key] === undefined || editValues[key] === '' || isDisconnected}
-                    >
-                      <Save size={14} /> Save
-                    </button>
-                  </td>
-                </tr>
-              ))
+              visibleParams.map(([key, val, m]) => {
+                const editVal = editValues[key];
+                const dirty = editVal !== undefined && editVal !== '';
+                const numEdit = dirty ? Number(editVal) : null;
+                const hasMin = Number.isFinite(Number(m?.min));
+                const hasMax = Number.isFinite(Number(m?.max));
+                const minN = hasMin ? Number(m.min) : null;
+                const maxN = hasMax ? Number(m.max) : null;
+                const outOfRange = dirty && Number.isFinite(numEdit) && (
+                  (hasMin && numEdit < minN) || (hasMax && numEdit > maxN)
+                );
+                const enumLabel = m?.values && m.values[String(val)] ? m.values[String(val)] : null;
+                const rowStatus = saveStatus[key];
+                const isPending = rowStatus?.state === 'pending';
+                const isError = rowStatus?.state === 'error';
+                const isOk = rowStatus?.state === 'ok';
+                const rangeHint = (hasMin || hasMax)
+                  ? `range ${hasMin ? minN : '−∞'}..${hasMax ? maxN : '+∞'}`
+                  : null;
+                return (
+                  <tr key={key}>
+                    <td style={{ textAlign: 'center' }}>
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        onClick={() => toggleFavorite(key)}
+                        title={favorites.has(key) ? 'Unpin favorite' : 'Pin favorite'}
+                      >
+                        <span style={{ color: favorites.has(key) ? '#fbbf24' : '#64748b' }}>
+                          {favorites.has(key) ? '★' : '☆'}
+                        </span>
+                      </button>
+                    </td>
+                    <td style={{ fontWeight: 'bold' }}>
+                      {key}
+                      {dirty && <span style={{ marginLeft: 6, color: 'var(--accent-yellow)' }} title="Unsaved change">●</span>}
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{m.units != null && m.units !== '' ? m.units : '—'}</td>
+                    <td style={{ fontSize: 12, maxWidth: 320, color: 'var(--text-secondary)' }}>
+                      <div title={m.description}>{m.description || '—'}</div>
+                      {(rangeHint || m.increment != null) && (
+                        <div style={{ fontSize: 11, color: '#64748b' }}>
+                          {rangeHint}
+                          {m.increment != null ? ` · step ${m.increment}` : ''}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ fontFamily: 'monospace' }}>
+                      {val}
+                      {enumLabel && <div style={{ fontSize: 11, color: '#64748b' }}>{enumLabel}</div>}
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        className="alt-input"
+                        value={editVal !== undefined ? editVal : ''}
+                        onChange={(e) => setEditValues({ ...editValues, [key]: e.target.value })}
+                        placeholder={String(val)}
+                        disabled={isDisconnected || isPending}
+                        min={hasMin ? minN : undefined}
+                        max={hasMax ? maxN : undefined}
+                        step={m.increment != null ? m.increment : 'any'}
+                        style={{
+                          width: '120px',
+                          backgroundColor: outOfRange
+                            ? 'rgba(239,68,68,0.18)'
+                            : dirty ? 'rgba(245,158,11,0.15)' : undefined,
+                          borderColor: outOfRange
+                            ? '#ef4444'
+                            : dirty ? 'var(--accent-yellow)' : 'var(--border-color)',
+                        }}
+                        title={outOfRange ? `Value out of range (${minN}..${maxN})` : undefined}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        className="btn-toolbar primary"
+                        style={{
+                          padding: '4px 12px',
+                          background: isOk ? '#16a34a' : isError ? '#dc2626' : undefined,
+                          borderColor: isOk ? '#16a34a' : isError ? '#dc2626' : undefined,
+                        }}
+                        onClick={() => handleSave(key)}
+                        disabled={!dirty || isDisconnected || isPending || outOfRange}
+                        title={isError ? rowStatus.error : isOk ? `Saved at ${new Date(rowStatus.at).toLocaleTimeString()}` : undefined}
+                      >
+                        <Save size={14} />
+                        {isPending ? ' …' : isOk ? ' OK' : isError ? ' ERR' : ' Save'}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

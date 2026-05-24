@@ -96,6 +96,19 @@ const useTelemetryStore = create((set, get) => ({
     connection_string: 'auto',
     baudrate: 115200,
   },
+  /**
+   * Diagnostics from /connection/status — exponential backoff state, last-error reason, and a
+   * rolling state-transition history. Populated by pollConnectionStatus + startConnection.
+   */
+  connectionDiagnostics: {
+    reconnect_attempts: 0,
+    next_reconnect_in_s: 0,
+    reconnect_retry_delay_s: 0,
+    last_error_reason: null,
+    last_error_detail: null,
+    heartbeat_age_s: null,
+    state_history: [],
+  },
 
   connect: () => {
     const existing = get().ws;
@@ -164,10 +177,14 @@ const useTelemetryStore = create((set, get) => ({
       .post(`${API_URL}/api/connection/start`, payload)
       .then((res) => {
         const backendState = res?.data?.connection_state;
+        const diag = res?.data?.diagnostics;
         if (backendState) {
           set((state) => ({
             connectionState: backendState,
             connected: backendState === 'CONNECTED' || backendState === 'ACTIVE',
+            connectionDiagnostics: diag
+              ? { ...state.connectionDiagnostics, ...diag }
+              : state.connectionDiagnostics,
             operational: deriveOperationalPhase({
               connectionState: backendState,
               vehicle: selectPrimaryVehicle(state),
@@ -263,6 +280,24 @@ const useTelemetryStore = create((set, get) => ({
       e.response = err.response;
       e.details = d?.details ?? d;
       throw e;
+    }
+  },
+
+  pollConnectionStatus: async () => {
+    try {
+      const res = await axios.get(`${API_URL}/api/connection/status`);
+      const diag = res?.data?.diagnostics;
+      const cs = res?.data?.connection_state;
+      set((state) => ({
+        connectionState: cs || state.connectionState,
+        connectionDiagnostics: diag
+          ? { ...state.connectionDiagnostics, ...diag }
+          : state.connectionDiagnostics,
+      }));
+      return res.data;
+    } catch (err) {
+      // Non-fatal: backend might be momentarily restarting. Don't clobber state on failure.
+      return null;
     }
   },
 

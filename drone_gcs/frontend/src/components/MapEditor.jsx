@@ -9,6 +9,13 @@ import useMissionStore, {
 } from '../store/useMissionStore';
 import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetryStore';
 import { loadMapPrefs, saveMapPrefs } from '../utils/mapPreferences';
+import {
+  deriveHeadingDeg,
+  buildFenceGroups,
+  waypointMarkerColor as markerColor,
+  createHomeMarker,
+  isValidHome,
+} from '../utils/mapShared';
 
 const API_URL = 'http://localhost:8080';
 
@@ -20,38 +27,6 @@ function distM(lat1, lon1, lat2, lon2) {
   const dLon = toR(lon2 - lon1);
   const a = Math.sin(dLat/2)**2 + Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
-// Marker colour per MAVLink command
-function markerColor(cmdNum, isCurrent) {
-  if (isCurrent) return '#10b981';
-  switch (Number(cmdNum)) {
-    case 5001: return '#22c55e'; // FENCE inclusion — green
-    case 5002: return '#ef4444'; // FENCE exclusion — red
-    case 22: return '#f59e0b';   // TAKEOFF — amber
-    case 21: return '#ef4444';   // LAND — red
-    case 20: return '#f97316';   // RTL — orange
-    case 17: case 18: case 19: return '#8b5cf6'; // LOITER — purple
-    case 201: return '#0ea5e9';  // ROI — cyan
-    case 206: case 203: return '#10b981'; // camera — green
-    default: return '#3b82f6';   // waypoint — blue
-  }
-}
-
-// Group consecutive fence vertices of the same type into polygon objects (matches MP Fence.LocationToFence)
-function buildFenceGroups(waypoints) {
-  const groups = [];
-  let current = null;
-  waypoints.forEach(wp => {
-    const type = Number(wp.command) === FENCE_CMD_EXCLUSION ? 'exclusion' : 'inclusion';
-    if (!current || current.type !== type) {
-      if (current) groups.push(current);
-      current = { type, coords: [] };
-    }
-    current.coords.push([wp.lng, wp.lat]);
-  });
-  if (current) groups.push(current);
-  return groups;
 }
 
 // Inline SVG for the drone arrow marker (triangle pointing north, rotates with heading)
@@ -93,19 +68,9 @@ const MapEditor = () => {
     const status = rawVehicle.status || {};
     const isNullIsland = pos.lat === 0.0 && pos.lng === 0.0;
     const hasValidGps = !isNullIsland || (status.gps_fix >= 3);
-    const heading = rawVehicle.velocity?.heading ?? null;
-    const attitudeYaw = rawVehicle.attitude?.yaw != null
-      ? (rawVehicle.attitude.yaw * 180 / Math.PI) : 0;
-    let finalHeading = heading;
-    if (finalHeading == null || finalHeading < 0) {
-      let yawDeg = attitudeYaw;
-      while (yawDeg < 0) yawDeg += 360;
-      while (yawDeg >= 360) yawDeg -= 360;
-      finalHeading = yawDeg;
-    }
     return {
       position: hasValidGps ? { lat: pos.lat, lng: pos.lng } : null,
-      heading: finalHeading,
+      heading: deriveHeadingDeg(rawVehicle),
     };
   }, [rawVehicle]);
 
@@ -255,20 +220,12 @@ const MapEditor = () => {
     }
   }, [vehicleMapState, mapReady]);
 
-  // ─── Home marker ──────────────────────────────────────────────────────────
+  // ─── Home marker — shared SVG with the Data tab map ───────────────────────
   useEffect(() => {
     if (!map.current) return;
     if (homeMarkerRef.current) { homeMarkerRef.current.remove(); homeMarkerRef.current = null; }
-    const lat = Number(vehicleHome?.lat);
-    const lng = Number(vehicleHome?.lng);
-    if (vehicleHome?.valid && Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
-      const el = document.createElement('div');
-      el.className = 'home-marker';
-      el.title = `Home: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-      el.innerHTML = '🏠';
-      homeMarkerRef.current = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-        .setLngLat([lng, lat])
-        .addTo(map.current);
+    if (isValidHome(vehicleHome)) {
+      homeMarkerRef.current = createHomeMarker(map.current, vehicleHome);
     }
   }, [vehicleHome?.lat, vehicleHome?.lng, vehicleHome?.valid]);
 

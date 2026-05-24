@@ -1,2 +1,5 @@
 /.DS_Store*.mov
 *.mov
+.DS_Store
+__pycache__/
+*.pyc

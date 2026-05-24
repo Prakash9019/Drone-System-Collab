@@ -323,6 +323,7 @@ async def fence_status():
         "alt_min": float(params.get("FENCE_ALT_MIN", 0.0)),
         "margin": float(params.get("FENCE_MARGIN", 2.0)),
         "fence_status_msg": fs,
+        "fence_status_msg": fs,
     }
 
 class FenceConfigRequest(BaseModel):
@@ -431,14 +432,19 @@ async def start_connection(req: ConnectionStartRequest):
         link_manager.baudrate = req.baudrate
 
     if link_manager._connect_lock.locked():
-        return {"status": "connect_in_progress", "connection_state": link_manager.connection_state.value}
+        return {
+            "status": "connect_in_progress",
+            "connection_state": link_manager.connection_state.value,
+            "diagnostics": link_manager.connection_diagnostics(),
+        }
 
     success = await link_manager.connect()
     if success and parameter_manager:
         parameter_manager.load_cache()
     return {
         "status": "connected" if success else "failed",
-        "connection_state": link_manager.connection_state.value
+        "connection_state": link_manager.connection_state.value,
+        "diagnostics": link_manager.connection_diagnostics(),
     }
 
 @app.post("/connection/stop")
@@ -459,6 +465,7 @@ async def connection_status():
         "last_heartbeat": link_manager.last_heartbeat_time,
         "running": link_manager.running,
         "vehicles": link_manager.list_vehicles_payload(),
+        "diagnostics": link_manager.connection_diagnostics(),
     }
 
 
