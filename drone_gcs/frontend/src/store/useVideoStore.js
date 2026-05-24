@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS = {
 
 const useVideoStore = create((set, get) => ({
   settings: DEFAULT_SETTINGS,
-  state: { active: false, peer_count: 0, encoding: null, last_buffer_age_s: null, gst_error: null },
+  state: { active: false, peer_count: 0, encoding: null, last_buffer_age_s: null, gst_error: null, fail_count: 0 },
   loading: false,
   banner: '',
 
@@ -39,7 +39,7 @@ const useVideoStore = create((set, get) => ({
   fetchState: async () => {
     try {
       const { data } = await axios.get(`${API_URL}/api/video/state`);
-      set({ state: data });
+      set({ state: data, banner: data?.gst_error || '' });
     } catch {}
   },
 

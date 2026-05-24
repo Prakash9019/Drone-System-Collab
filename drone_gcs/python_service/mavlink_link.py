@@ -237,6 +237,17 @@ class LinkManager:
         ]
         for stream_id, rate in streams:
             self.conn.mav.request_data_stream_send(sysid, compid, stream_id, rate, 1)
+        # ArduPilot only sends HOME_POSITION and GPS_GLOBAL_ORIGIN on request — Mission Planner
+        # does the same after the heartbeat handshake. We need both to anchor the map and to
+        # detect HOME ≠ EKF_ORIGIN drift, which is a common source of "drone shows in the wrong
+        # spot" symptoms.
+        try:
+            # MAV_CMD_GET_HOME_POSITION (410) — drone replies with HOME_POSITION
+            self.conn.mav.command_long_send(sysid, compid, 410, 0, 0, 0, 0, 0, 0, 0, 0)
+            # MAV_CMD_REQUEST_MESSAGE (512) for GPS_GLOBAL_ORIGIN (msg id 49)
+            self.conn.mav.command_long_send(sysid, compid, 512, 0, 49, 0, 0, 0, 0, 0, 0)
+        except Exception as e:
+            logger.debug(f"HOME/ORIGIN request skipped: {e}")
 
     def request_data_streams(self):
         if not self.conn or not self.primary_sysid:

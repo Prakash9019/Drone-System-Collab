@@ -20,6 +20,24 @@ function headingDegFromVehicle(v) {
   return deg < 0 ? deg + 360 : deg;
 }
 
+// Mission Planner–style quadcopter top-down icon. Body + 4 motor pods + forward arrow.
+// Drawn pointing north (0°); maplibre rotates with setRotation(heading).
+// No percent units inside the SVG (they'd collide with data: URI percent-encoding).
+const DRONE_SVG_RAW = '<svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">'
+  + '<line x1="22" y1="22" x2="7" y2="7" stroke="#facc15" stroke-width="3" stroke-linecap="round"/>'
+  + '<line x1="22" y1="22" x2="37" y2="7" stroke="#facc15" stroke-width="3" stroke-linecap="round"/>'
+  + '<line x1="22" y1="22" x2="7" y2="37" stroke="#ef4444" stroke-width="3" stroke-linecap="round"/>'
+  + '<line x1="22" y1="22" x2="37" y2="37" stroke="#ef4444" stroke-width="3" stroke-linecap="round"/>'
+  + '<circle cx="7" cy="7" r="5.5" fill="#1e293b" stroke="#facc15" stroke-width="1.8"/>'
+  + '<circle cx="37" cy="7" r="5.5" fill="#1e293b" stroke="#facc15" stroke-width="1.8"/>'
+  + '<circle cx="7" cy="37" r="5.5" fill="#1e293b" stroke="#ef4444" stroke-width="1.8"/>'
+  + '<circle cx="37" cy="37" r="5.5" fill="#1e293b" stroke="#ef4444" stroke-width="1.8"/>'
+  + '<polygon points="22,2 27,11 22,9 17,11" fill="#22c55e" stroke="#ffffff" stroke-width="0.9"/>'
+  + '<rect x="16.5" y="16.5" width="11" height="11" rx="2" fill="#0f172a" stroke="#ffffff" stroke-width="1.6"/>'
+  + '<circle cx="22" cy="22" r="2" fill="#60a5fa"/>'
+  + '</svg>';
+const DRONE_SVG_URI = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(DRONE_SVG_RAW);
+
 const MapView = () => {
   const mapContainer = useRef(null);
   const map = useRef(null);
@@ -32,6 +50,9 @@ const MapView = () => {
   const waypointMarkersRef = useRef([]);
   const userPausedFollowRef = useRef(false);
   const programmaticMoveRef = useRef(false);
+  // Smooth-interpolation state for the primary vehicle marker.
+  // Telemetry arrives at 10 Hz; we tween to the target position at 60 fps so movement looks continuous.
+  const markerAnimRef = useRef({ lng: null, lat: null, hdg: 0, targetLng: null, targetLat: null, targetHdg: 0, lastTargetAt: 0, raf: 0 });
 
   const navigate = useNavigate();
   const vehicle = useTelemetryStore(selectPrimaryVehicle);
@@ -56,9 +77,23 @@ const MapView = () => {
     return null;
   }, [primarySysId, vehicle?.sysid]);
 
-  const lat = vehicle?.position?.lat || 0;
-  const lng = vehicle?.position?.lng || 0;
-  const heading = useMemo(() => headingDegFromVehicle(vehicle), [vehicle]);
+  // GPS validity is driven *only* by MAVLink telemetry. No fallback, no browser geo, no cached prefs.
+  // The marker is hidden until we have a real fix from GLOBAL_POSITION_INT with non-zero coordinates
+  // AND a GPS fix type ≥ 2 from GPS_RAW_INT (3D fix preferred). This is the same rule Mission Planner
+  // uses before it starts drawing the vehicle on the map.
+  const rawLat = Number(vehicle?.position?.lat);
+  const rawLng = Number(vehicle?.position?.lng);
+  const gpsFix = Number(vehicle?.status?.gps_fix ?? 0);
+  const positionValid = Number.isFinite(rawLat) && Number.isFinite(rawLng)
+    && !(rawLat === 0 && rawLng === 0)
+    && Math.abs(rawLat) <= 90 && Math.abs(rawLng) <= 180
+    && gpsFix >= 2;
+  const lat = positionValid ? rawLat : null;
+  const lng = positionValid ? rawLng : null;
+  const heading = useMemo(() => positionValid ? headingDegFromVehicle(vehicle) : 0, [vehicle, positionValid]);
+  // One-shot "center map on first valid telemetry" flag. Saved prefs only seed the IDLE view;
+  // once real telemetry arrives we jumpTo the vehicle and never bounce back.
+  const firstFixCenteredRef = useRef(false);
 
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, latLng: null });
   const [mapStyleLoaded, setMapStyleLoaded] = useState(false);
@@ -142,15 +177,16 @@ const MapView = () => {
     attachUserGestureHandlers();
 
     const el = document.createElement('div');
-    el.style.cssText = 'width:34px;height:34px;background-size:contain;background-repeat:no-repeat;filter:drop-shadow(0 0 4px rgba(59,130,246,0.8));';
-    el.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(
-      '<svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg">' +
-      '<polygon points="17,1 31,32 17,25 3,32" fill="%233b82f6" stroke="%23ffffff" stroke-width="2.5" stroke-linejoin="round"/>' +
-      '<circle cx="17" cy="17" r="3" fill="%23ffffff" opacity="0.8"/>' +
-      '</svg>'
-    )}")`;
-    el.title = 'Vehicle';
+    // Hidden by default — only flips to visible after a valid GPS fix arrives from MAVLink.
+    // Hyderabad-or-saved fallback never positions the drone marker; it only seeds the map view.
+    el.style.cssText = 'width:48px;height:48px;display:none;align-items:center;justify-content:center;filter:drop-shadow(0 0 6px rgba(96,165,250,0.95));pointer-events:none;';
+    el.innerHTML = DRONE_SVG_RAW;
+    el.title = 'Vehicle (waiting for GPS lock)';
 
+    // Park the marker at the initial map center so MapLibre has *somewhere* to attach the DOM
+    // element. setLngLat is required before addTo, but the element is display:none so it is
+    // invisible to the user. Once telemetry arrives, the position-update effect calls setLngLat
+    // with real coordinates *and* flips the element to display:flex.
     marker.current = new maplibregl.Marker({ element: el, rotationAlignment: 'map', anchor: 'center' })
       .setLngLat([initial.lng, initial.lat])
       .addTo(map.current);
@@ -228,17 +264,19 @@ const MapView = () => {
       setContextMenu((prev) => ({ ...prev, visible: false }));
     });
 
+    // Browser geolocation only seeds the IDLE map view (operator-side convenience).
+    // It NEVER positions the vehicle marker, and it must not steal centering from real
+    // telemetry — if a MAVLink fix has already landed, skip the geo jump entirely.
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
+          if (firstFixCenteredRef.current) return;
           const { latitude, longitude } = pos.coords;
           programmaticMoveRef.current = true;
           map.current.jumpTo({ center: [longitude, latitude], zoom: Math.max(initialZoom, 14) });
           saveMapPrefs({ center: [longitude, latitude], zoom: map.current.getZoom() });
           setGeoNote('');
-          setTimeout(() => {
-            programmaticMoveRef.current = false;
-          }, 400);
+          setTimeout(() => { programmaticMoveRef.current = false; }, 400);
         },
         () => {
           setGeoNote('Using saved or default map center (location permission denied or unavailable).');
@@ -255,39 +293,106 @@ const MapView = () => {
   useEffect(() => {
     if (!map.current || !marker.current) return;
 
-    if (lat !== 0 && lng !== 0) {
-      marker.current.setLngLat([lng, lat]);
-      marker.current.setRotation(heading || 0);
-      const coords = trailRef.current;
-      const prev = coords[coords.length - 1];
-      const moved = !prev || Math.abs(prev[0] - lng) > 1e-6 || Math.abs(prev[1] - lat) > 1e-6;
-      if (moved) {
-        coords.push([lng, lat]);
-        if (coords.length > 1500) coords.splice(0, coords.length - 1500);
+    const el = marker.current.getElement();
+
+    // Telemetry invalid / no GPS lock → hide the marker, stop interpolation, clear trail head.
+    // We never place the drone at fallback / saved / browser coords — Mission Planner only renders
+    // the vehicle once GLOBAL_POSITION_INT has been received with a real fix.
+    if (!positionValid) {
+      if (el && el.style.display !== 'none') {
+        el.style.display = 'none';
+        el.title = 'Vehicle (waiting for GPS lock)';
       }
+      const a = markerAnimRef.current;
+      a.lng = null; a.lat = null; a.targetLng = null; a.targetLat = null;
+      if (a.raf) { cancelAnimationFrame(a.raf); a.raf = 0; }
+      return;
+    }
+
+    // First real fix this session → expose the marker, jump map to the actual vehicle location
+    // (overriding any saved/cached/browser center), and seed the interpolator.
+    if (el && el.style.display === 'none') {
+      el.style.display = 'flex';
+      el.title = 'Vehicle';
+    }
+    if (!firstFixCenteredRef.current && map.current.isStyleLoaded()) {
+      firstFixCenteredRef.current = true;
+      programmaticMoveRef.current = true;
+      map.current.jumpTo({ center: [lng, lat], zoom: Math.max(map.current.getZoom(), 16) });
+      setTimeout(() => { programmaticMoveRef.current = false; }, 200);
+    }
+
+    const anim = markerAnimRef.current;
+    const now = performance.now();
+    if (anim.lng == null || anim.lat == null) {
+      anim.lng = lng; anim.lat = lat; anim.hdg = heading || 0;
+      marker.current.setLngLat([lng, lat]).setRotation(anim.hdg);
+    }
+    anim.targetLng = lng;
+    anim.targetLat = lat;
+    anim.targetHdg = heading || 0;
+    anim.lastTargetAt = now;
+
+    // Append to flight trail (decimated) — uses the target sample, not interpolated frames.
+    const coords = trailRef.current;
+    const prev = coords[coords.length - 1];
+    const moved = !prev || Math.abs(prev[0] - lng) > 1e-6 || Math.abs(prev[1] - lat) > 1e-6;
+    if (moved) {
+      coords.push([lng, lat]);
+      if (coords.length > 1500) coords.splice(0, coords.length - 1500);
       const src = map.current.getSource('flight-trail');
       if (src) {
-        src.setData({
-          type: 'Feature',
-          properties: {},
-          geometry: { type: 'LineString', coordinates: coords },
-        });
-      }
-
-      const follow =
-        autoFollowVehicle &&
-        !userPausedFollowRef.current &&
-        isConnected &&
-        map.current.isStyleLoaded();
-      if (follow) {
-        programmaticMoveRef.current = true;
-        map.current.easeTo({ center: [lng, lat], duration: 600, essential: true });
-        setTimeout(() => {
-          programmaticMoveRef.current = false;
-        }, 700);
+        src.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
       }
     }
+
+    const follow = autoFollowVehicle && !userPausedFollowRef.current && isConnected && map.current.isStyleLoaded();
+    if (follow) {
+      programmaticMoveRef.current = true;
+      map.current.easeTo({ center: [lng, lat], duration: 600, essential: true });
+      setTimeout(() => { programmaticMoveRef.current = false; }, 700);
+    }
+
+    // Start the rAF interpolator if not already running.
+    if (!anim.raf) {
+      const step = () => {
+        const a = markerAnimRef.current;
+        if (a.targetLng == null) { a.raf = 0; return; }
+        // Time-based easing: cover ~100 ms (one telemetry frame) with critically-damped tween.
+        const k = 0.22; // higher = snappier
+        a.lng += (a.targetLng - a.lng) * k;
+        a.lat += (a.targetLat - a.lat) * k;
+        // Shortest-arc heading interp.
+        let dh = ((a.targetHdg - a.hdg + 540) % 360) - 180;
+        a.hdg = (a.hdg + dh * k + 360) % 360;
+        if (marker.current) {
+          marker.current.setLngLat([a.lng, a.lat]);
+          marker.current.setRotation(a.hdg);
+        }
+        a.raf = requestAnimationFrame(step);
+      };
+      anim.raf = requestAnimationFrame(step);
+    }
   }, [lat, lng, heading, autoFollowVehicle, isConnected]);
+
+  // Cancel the rAF on unmount.
+  useEffect(() => () => {
+    const a = markerAnimRef.current;
+    if (a.raf) { cancelAnimationFrame(a.raf); a.raf = 0; }
+  }, []);
+
+  // On disconnect, re-arm the "center on first fix" flag and clear the trail so the next
+  // session starts clean instead of stitching a line from the previous session's last point.
+  useEffect(() => {
+    if (connectionState === 'DISCONNECTED' || connectionState === 'CONNECTING') {
+      firstFixCenteredRef.current = false;
+      trailRef.current = [];
+      if (map.current?.isStyleLoaded()) {
+        const src = map.current.getSource('flight-trail');
+        if (src) src.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } });
+      }
+    }
+  }, [connectionState]);
 
   useEffect(() => {
     if (!map.current) return;
@@ -303,15 +408,16 @@ const MapView = () => {
     }
 
     if (!homeMarker.current) {
+      // House-shape SVG, smaller than the vehicle, so the drone is always the prominent marker.
       const el = document.createElement('div');
-      el.style.width = '20px';
-      el.style.height = '20px';
-      el.style.borderRadius = '50%';
-      el.style.backgroundColor = '#22c55e';
-      el.style.border = '2px solid #fff';
-      el.style.boxShadow = '0 1px 4px rgba(0,0,0,0.5)';
+      el.style.cssText = 'width:22px;height:22px;display:flex;align-items:center;justify-content:center;pointer-events:none;opacity:0.92;';
+      el.innerHTML =
+        '<svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">'
+          + '<path d="M3 11 L11 3 L19 11 L19 19 L13 19 L13 14 L9 14 L9 19 L3 19 Z" fill="#16a34a" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>'
+          + '<rect x="9.5" y="14" width="3" height="5" fill="#052e16"/>'
+        + '</svg>';
       el.title = `Home (${h.lat?.toFixed(6)}, ${h.lng?.toFixed(6)})`;
-      homeMarker.current = new maplibregl.Marker({ element: el }).setLngLat([h.lng, h.lat]).addTo(map.current);
+      homeMarker.current = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([h.lng, h.lat]).addTo(map.current);
     } else {
       homeMarker.current.setLngLat([h.lng, h.lat]);
     }
@@ -557,15 +663,15 @@ const MapView = () => {
             className="btn-toolbar"
             style={{ fontSize: 11, padding: '4px 8px' }}
             onClick={() => {
-              if (!map.current || lat === 0 || lng === 0) return;
+              if (!map.current || !positionValid) return;
               programmaticMoveRef.current = true;
               map.current.easeTo({ center: [lng, lat], zoom: Math.max(map.current.getZoom(), 15), duration: 800 });
               setTimeout(() => {
                 programmaticMoveRef.current = false;
               }, 900);
             }}
-            disabled={lat === 0 || lng === 0}
-            title="Center on primary vehicle"
+            disabled={!positionValid}
+            title={positionValid ? 'Center on primary vehicle' : 'No GPS fix yet'}
           >
             Go to vehicle
           </button>

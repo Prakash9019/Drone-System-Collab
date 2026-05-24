@@ -89,6 +89,8 @@ class GstVideoReceiver:
         self._last_buffer_ts: float = 0.0
         self._watchdog_task: asyncio.Task | None = None
         self._stopped = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._last_error: str | None = None
 
         self.on_timeout: Callable[[], Awaitable[None]] | None = None
         self.on_state: Callable[[dict[str, Any]], Awaitable[None]] | None = None
@@ -137,6 +139,7 @@ class GstVideoReceiver:
         if ret == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("pipeline failed to enter PLAYING state")
 
+        self._loop = asyncio.get_running_loop()
         self._last_buffer_ts = time.monotonic()
         self._watchdog_task = asyncio.create_task(self._watchdog())
         logger.info(
@@ -235,11 +238,19 @@ class GstVideoReceiver:
         if t == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
             logger.error("gst error: %s | %s", err.message, debug)
+            self._last_error = f"{err.message} | {debug}" if debug else err.message
+            # Immediately fire the timeout callback so the manager can restart
+            # without waiting the full watchdog window.
+            if self.on_timeout and self._loop and not self._stopped.is_set():
+                asyncio.run_coroutine_threadsafe(self.on_timeout(), self._loop)
         elif t == Gst.MessageType.WARNING:
             err, debug = msg.parse_warning()
             logger.warning("gst warning: %s | %s", err.message, debug)
         elif t == Gst.MessageType.EOS:
             logger.info("gst EOS")
+            self._last_error = "Stream ended (EOS)"
+            if self.on_timeout and self._loop and not self._stopped.is_set():
+                asyncio.run_coroutine_threadsafe(self.on_timeout(), self._loop)
         # STREAM_COLLECTION audio-stream filtering omitted — drone streams are usually video-only
 
     # ─── State publication ────────────────────────────────────────────────
@@ -260,4 +271,5 @@ class GstVideoReceiver:
                 if self._last_buffer_ts
                 else None
             ),
+            "last_error": self._last_error,
         }

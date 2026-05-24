@@ -110,10 +110,30 @@ function validateMission(waypoints, missionType) {
   const warnings = [];
   const cmds = waypoints.map(w => Number(w.command));
   if (!cmds.includes(22)) warnings.push('No TAKEOFF command (cmd 22) — drone may not arm for AUTO mode');
+  // ArduPilot Copter: TAKEOFF must be the first non-HOME item. The mission_manager backend
+  // injects HOME at seq=0 on upload, so the planner's index 0 must be TAKEOFF.
+  if (cmds.length > 0 && cmds[0] !== 22 && cmds.includes(22)) {
+    warnings.push('TAKEOFF is not the first item — Copter AUTO requires TAKEOFF immediately after HOME');
+  }
   if (!cmds.some(c => c === 20 || c === 21)) warnings.push('No RTL (20) or LAND (21) — mission may not end cleanly');
   if (waypoints.length > 500) warnings.push(`Large mission: ${waypoints.length} waypoints (limit may be 512)`);
   if (waypoints.some(w => !w.lat && !w.lng)) warnings.push('Some waypoints have zero coordinates — check table');
   return warnings;
+}
+
+// Hard blockers that must prevent upload/AUTO entirely. Soft warnings still pass through validateMission().
+function blockingErrors(waypoints, missionType) {
+  if (missionType !== 'MISSION') return [];
+  const errors = [];
+  const cmds = waypoints.map(w => Number(w.command));
+  if (!cmds.length) errors.push('Mission is empty.');
+  if (cmds.length && !cmds.includes(22)) {
+    errors.push('Mission has no TAKEOFF (cmd 22). Click "⚠ Insert TAKEOFF" before WRITE / AUTO.');
+  }
+  if (cmds.length && cmds[0] !== 22) {
+    errors.push('First mission item must be TAKEOFF (cmd 22).');
+  }
+  return errors;
 }
 
 const FlightPlanner = () => {
@@ -145,8 +165,10 @@ const FlightPlanner = () => {
   const [fenceStatus, setFenceStatus] = useState(null);
   const [showValidation, setShowValidation] = useState(false);
   const [fenceForm, setFenceForm] = useState({
-    enabled: false, action: 0, radius: 100.0, alt_max: 120.0, alt_min: 0.0,
+    enabled: false, action: 0, radius: 100.0, alt_max: 120.0, alt_min: 0.0, margin: 2.0,
   });
+  // Ref (not state) so the polling closure always reads the latest value without restarting the interval.
+  const fenceFormDirtyRef = useRef(false);
 
   const vehicle = useTelemetryStore(selectPrimaryVehicle) || {};
   const sendShortcutCommand = useTelemetryStore((s) => s.sendShortcutCommand);
@@ -272,6 +294,15 @@ const FlightPlanner = () => {
   };
 
   const handleWrite = async () => {
+    // Block upload if the mission is structurally broken for Copter AUTO. ArduPilot will
+    // accept the upload but later refuse to enter AUTO with "Auto: Missing Takeoff Cmd",
+    // which is the exact failure mode we are trying to prevent.
+    const blockers = blockingErrors(waypoints, missionType);
+    if (blockers.length) {
+      setStatusMsg(`Mission rejected — ${blockers[0]}`);
+      setShowValidation(true);
+      return;
+    }
     setLoading(true);
     setStatusMsg('Uploading mission to drone...');
     try {
@@ -334,17 +365,23 @@ const FlightPlanner = () => {
 
   useEffect(() => {
     if (missionType !== 'FENCE') return;
+    // Reset dirty when the user switches into FENCE mode so the initial load always populates the form.
+    fenceFormDirtyRef.current = false;
     const run = async () => {
       try {
         const res = await axios.get(`${API_URL}/api/fence/status`);
         setFenceStatus(res.data);
-        setFenceForm({
-          enabled: !!res.data?.enabled,
-          action: Number(res.data?.action ?? 0),
-          radius: Number(res.data?.radius ?? 100),
-          alt_max: Number(res.data?.alt_max ?? 120),
-          alt_min: Number(res.data?.alt_min ?? 0),
-        });
+        // Only overwrite the form when clean — prevents the 2.5s poll from wiping user edits.
+        if (!fenceFormDirtyRef.current) {
+          setFenceForm({
+            enabled: !!res.data?.enabled,
+            action: Number(res.data?.action ?? 0),
+            radius: Number(res.data?.radius ?? 100),
+            alt_max: Number(res.data?.alt_max ?? 120),
+            alt_min: Number(res.data?.alt_min ?? 0),
+            margin: Number(res.data?.margin ?? 2),
+          });
+        }
       } catch { setFenceStatus(null); }
     };
     run();
@@ -353,12 +390,26 @@ const FlightPlanner = () => {
   }, [missionType]);
 
   const applyFenceConfig = async () => {
+    if (fenceForm.radius > 0 && fenceForm.margin >= fenceForm.radius) {
+      setStatusMsg(`Fence rejected — FENCE_MARGIN (${fenceForm.margin}m) must be less than FENCE_RADIUS (${fenceForm.radius}m). Reduce margin or increase radius.`);
+      return;
+    }
     try {
       setLoading(true);
       await axios.post(`${API_URL}/api/fence/config`, fenceForm);
+      fenceFormDirtyRef.current = false;
       setStatusMsg('Fence configuration applied.');
       const res = await axios.get(`${API_URL}/api/fence/status`);
       setFenceStatus(res.data);
+      // Sync form with confirmed ArduPilot values after a successful write.
+      setFenceForm({
+        enabled: !!res.data?.enabled,
+        action: Number(res.data?.action ?? 0),
+        radius: Number(res.data?.radius ?? 100),
+        alt_max: Number(res.data?.alt_max ?? 120),
+        alt_min: Number(res.data?.alt_min ?? 0),
+        margin: Number(res.data?.margin ?? 2),
+      });
     } catch (err) {
       setStatusMsg(extractErrText(err, 'Failed to apply fence configuration.'));
     } finally { setLoading(false); }
@@ -592,28 +643,33 @@ const FlightPlanner = () => {
       {missionType === 'FENCE' && (
         <div className="mission-toolbar" style={{ height: 'auto', minHeight: 54, gap: 10 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="checkbox" checked={!!fenceForm.enabled} onChange={e => setFenceForm(s => ({ ...s, enabled: e.target.checked }))} disabled={loading} />
+            <input type="checkbox" checked={!!fenceForm.enabled} onChange={e => { fenceFormDirtyRef.current = true; setFenceForm(s => ({ ...s, enabled: e.target.checked })); }} disabled={loading} />
             Enable
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             Action
-            <select className="status-search" style={{ width: 110, height: 34 }} value={fenceForm.action} onChange={e => setFenceForm(s => ({ ...s, action: Number(e.target.value) }))} disabled={loading}>
+            <select className="status-search" style={{ width: 110, height: 34 }} value={fenceForm.action} onChange={e => { fenceFormDirtyRef.current = true; setFenceForm(s => ({ ...s, action: Number(e.target.value) })); }} disabled={loading}>
               <option value={0}>Report</option>
               <option value={1}>RTL</option>
               <option value={2}>Land</option>
               <option value={3}>Brake</option>
             </select>
           </label>
-          {[['radius', 'Radius m'], ['alt_max', 'Alt Max'], ['alt_min', 'Alt Min']].map(([k, label]) => (
+          {[['radius', 'Radius m'], ['margin', 'Margin m'], ['alt_max', 'Alt Max'], ['alt_min', 'Alt Min']].map(([k, label]) => (
             <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               {label}
               <input type="number" className="status-search" style={{ width: 90, height: 34 }} value={fenceForm[k]}
-                onChange={e => setFenceForm(s => ({ ...s, [k]: Number(e.target.value) }))} disabled={loading} />
+                onChange={e => { fenceFormDirtyRef.current = true; setFenceForm(s => ({ ...s, [k]: Number(e.target.value) })); }} disabled={loading} />
             </label>
           ))}
-          <button className="btn-toolbar primary" onClick={applyFenceConfig} disabled={loading}>Apply Fence Config</button>
+          {fenceForm.radius > 0 && fenceForm.margin >= fenceForm.radius && (
+            <span style={{ color: '#ef4444', fontSize: 11, fontWeight: 600 }}>
+              ⚠ Margin ≥ Radius — ArduPilot will reject
+            </span>
+          )}
+          <button className="btn-toolbar primary" onClick={applyFenceConfig} disabled={loading || (fenceForm.radius > 0 && fenceForm.margin >= fenceForm.radius)}>Apply Fence Config</button>
           <span className="status-msg" style={{ opacity: 0.75, fontSize: 11 }}>
-            Draw polygon → pick inclusion/exclusion → Write → Enable → Apply Config
+            Draw polygon → Write → Enable → set Margin &lt; Radius → Apply Config
           </span>
         </div>
       )}

@@ -37,6 +37,13 @@ export class VideoClient {
       }
     };
 
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') {
+        this.onError(`WebRTC connection failed`);
+        this._scheduleReconnect();
+      }
+    };
+
     const ws = new WebSocket(SIGNALING_URL);
     this.ws = ws;
 
@@ -48,10 +55,16 @@ export class VideoClient {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
       if (msg.type === 'offer') {
-        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        this._send({ type: 'answer', sdp: answer.sdp });
+        try {
+          await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          this._send({ type: 'answer', sdp: answer.sdp });
+        } catch (e) {
+          this.onError(`SDP negotiation failed: ${e.message}`);
+          this._cleanupSocket();
+          this._scheduleReconnect();
+        }
       } else if (msg.type === 'ice') {
         try {
           await pc.addIceCandidate(msg.candidate);
@@ -60,7 +73,8 @@ export class VideoClient {
         }
       } else if (msg.type === 'error') {
         this.onError(msg.message || 'signaling error');
-        this.close();
+        this._cleanupSocket();
+        this._scheduleReconnect();
       }
     };
     ws.onerror = () => this.onError('signaling websocket error');

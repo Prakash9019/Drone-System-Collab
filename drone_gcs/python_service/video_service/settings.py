@@ -44,6 +44,9 @@ class VideoSettings:
 
     video_source: VideoSource = VideoSource.DISABLED
     rtsp_url: str = ""
+    rtsp_username: str = ""
+    rtsp_password: str = ""
+    rtsp_tcp_transport: bool = False
     udp_port: int = 5600
     tcp_url: str = ""
     aspect_ratio: float = 0.0  # 0 = auto-detect from stream
@@ -133,6 +136,9 @@ RESTART_FIELDS: frozenset[str] = frozenset(
     {
         "video_source",
         "rtsp_url",
+        "rtsp_username",
+        "rtsp_password",
+        "rtsp_tcp_transport",
         "udp_port",
         "tcp_url",
         "low_latency_mode",

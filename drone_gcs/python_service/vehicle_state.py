@@ -110,6 +110,15 @@ class HomePosition:
     valid: bool = False
 
 @dataclass
+class EKFOrigin:
+    """EKF origin from MAVLink GPS_GLOBAL_ORIGIN. Mission Planner anchors mission math here.
+    Diverging from HOME_POSITION is a known cause of "drone appears at wrong place" symptoms."""
+    lat: float = 0.0
+    lng: float = 0.0
+    alt_m: float = 0.0
+    valid: bool = False
+
+@dataclass
 class VehicleState:
     sysid: int
     compid: int
@@ -129,6 +138,7 @@ class VehicleState:
     link_status: LinkStatus = field(default_factory=LinkStatus)
     parameters: Dict[str, Any] = field(default_factory=dict)
     home: HomePosition = field(default_factory=HomePosition)
+    ekf_origin: EKFOrigin = field(default_factory=EKFOrigin)
     mission_current_seq: int = -1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -218,6 +228,12 @@ class VehicleState:
                 "lng": self.home.lng,
                 "alt_m": self.home.alt_m,
                 "valid": self.home.valid,
+            },
+            "ekf_origin": {
+                "lat": self.ekf_origin.lat,
+                "lng": self.ekf_origin.lng,
+                "alt_m": self.ekf_origin.alt_m,
+                "valid": self.ekf_origin.valid,
             },
             "mission": {
                 "current_seq": self.mission_current_seq,

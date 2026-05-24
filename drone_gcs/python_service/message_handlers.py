@@ -108,6 +108,13 @@ def handle_message(msg: any, state: VehicleState):
         state.home.lng = msg.longitude / 1e7
         state.home.alt_m = msg.altitude / 1000.0
         state.home.valid = True
+
+    elif msg_type == 'GPS_GLOBAL_ORIGIN':
+        # EKF origin in 1e7-scaled lat/lng + mm altitude.
+        state.ekf_origin.lat = msg.latitude / 1e7
+        state.ekf_origin.lng = msg.longitude / 1e7
+        state.ekf_origin.alt_m = msg.altitude / 1000.0
+        state.ekf_origin.valid = True
         
     elif msg_type == 'MISSION_CURRENT':
         state.mission_current_seq = int(msg.seq)

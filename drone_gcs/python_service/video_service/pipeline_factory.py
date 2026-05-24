@@ -45,6 +45,13 @@ def build_source_bin(Gst: Any, settings: VideoSettings) -> tuple[Any, str]:
         rtspsrc.set_property("udp-reconnect", True)
         rtspsrc.set_property("drop-on-latency", True)
         rtspsrc.set_property("retry", 3)
+        if settings.rtsp_username:
+            rtspsrc.set_property("user-id", settings.rtsp_username)
+        if settings.rtsp_password:
+            rtspsrc.set_property("user-pw", settings.rtsp_password)
+        if settings.rtsp_tcp_transport:
+            # Force TCP-only — more reliable over internet/NAT, avoids UDP firewall issues
+            rtspsrc.set_property("protocols", 4)  # GST_RTSP_LOWER_TRANS_TCP
         depay = _make(Gst, "rtph264depay", "depay")
         parser = _make(Gst, "h264parse", "parser")
         bin_.add(rtspsrc)

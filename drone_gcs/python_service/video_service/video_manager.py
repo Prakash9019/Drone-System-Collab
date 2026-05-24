@@ -16,6 +16,26 @@ from .settings import RESTART_FIELDS, SettingsStore, VideoSettings, VideoSource
 logger = logging.getLogger(__name__)
 
 
+_MAX_BACKOFF_S = 60.0
+_BASE_BACKOFF_S = 2.0
+
+
+def _classify_error(msg: str) -> str:
+    """Turn a raw GStreamer error into a human-readable diagnosis."""
+    m = msg.lower()
+    if "403" in m or "forbidden" in m or "unauthorized" in m or "401" in m:
+        return f"Auth failed (403 Forbidden) — check RTSP username/password. [{msg}]"
+    if "connection refused" in m or "failed to connect" in m or "generic error" in m:
+        return f"Server unreachable — check URL and network. [{msg}]"
+    if "timeout" in m or "timed out" in m:
+        return f"Connection timed out — server may be offline or behind firewall. [{msg}]"
+    if "404" in m or "not found" in m:
+        return f"Stream not found (404) — check stream name in URL. [{msg}]"
+    if "eos" in m or "ended" in m:
+        return f"Stream ended — source stopped transmitting. [{msg}]"
+    return msg
+
+
 class VideoManager:
     def __init__(self) -> None:
         self._store = SettingsStore()
@@ -23,6 +43,7 @@ class VideoManager:
         self._lock = asyncio.Lock()
         self._gst_error: str | None = None
         self._restart_pending: asyncio.Task | None = None
+        self._fail_count: int = 0
 
     # ─── Properties ────────────────────────────────────────────────────────
     @property
@@ -35,10 +56,14 @@ class VideoManager:
             "encoding": None,
             "peer_count": 0,
             "last_buffer_age_s": None,
+            "last_error": None,
         }
+        # Prefer the classified manager-level error; fall back to raw receiver error
+        error = self._gst_error or rx.get("last_error")
         return {
             **rx,
-            "gst_error": self._gst_error,
+            "gst_error": error,
+            "fail_count": self._fail_count,
             "settings": self._store.settings.to_dict(),
         }
 
@@ -62,12 +87,15 @@ class VideoManager:
                 await receiver.start()
                 self._receiver = receiver
                 self._gst_error = None
+                self._fail_count = 0
             except GstUnavailableError as e:
                 logger.warning("GStreamer unavailable: %s", e)
                 self._gst_error = str(e)
+                self._fail_count += 1
             except Exception as e:
                 logger.exception("video pipeline start failed")
-                self._gst_error = str(e)
+                self._gst_error = _classify_error(str(e))
+                self._fail_count += 1
             return self.state()
 
     async def stop(self) -> dict[str, Any]:
@@ -109,14 +137,21 @@ class VideoManager:
 
     # ─── Watchdog response ─────────────────────────────────────────────────
     async def _on_receiver_timeout(self) -> None:
-        logger.warning("receiver watchdog fired — scheduling restart")
+        # Capture the last GST error from the receiver before it's torn down
+        if self._receiver and self._receiver._last_error:
+            self._gst_error = _classify_error(self._receiver._last_error)
+        logger.warning("receiver watchdog fired — scheduling restart (fail_count=%d)", self._fail_count)
         if self._restart_pending and not self._restart_pending.done():
             return
         self._restart_pending = asyncio.create_task(self._delayed_restart())
 
     async def _delayed_restart(self) -> None:
+        # Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s cap
+        # fail_count is incremented by start() on each failed attempt and reset on success
+        delay = min(_BASE_BACKOFF_S * (2 ** self._fail_count), _MAX_BACKOFF_S)
+        logger.info("backoff restart in %.1fs (fail_count=%d)", delay, self._fail_count)
         try:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(delay)
             await self._restart()
         except Exception:
             logger.exception("delayed restart failed")

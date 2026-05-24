@@ -1,0 +1,20 @@
+{
+  "video_source": "RTSP",
+  "rtsp_url": "rtsp://184.72.239.149/vod/mp4:BigBuckBunny_175k.mov",
+  "rtsp_username": "",
+  "rtsp_password": "",
+  "rtsp_tcp_transport": true,
+  "udp_port": 5600,
+  "tcp_url": "",
+  "aspect_ratio": 0.0,
+  "video_fit": "FIT_HEIGHT",
+  "grid_lines": true,
+  "recording_format": "MP4",
+  "max_video_size_mb": 10240,
+  "enable_storage_limit": false,
+  "stream_enabled": true,
+  "disable_when_disarmed": false,
+  "low_latency_mode": true,
+  "stream_timeout_s": 15,
+  "frame_smoothing_enabled": false
+}

@@ -31,6 +31,8 @@ const VideoSettingsPanel = () => {
 
   // Local editable copies for text inputs so typing isn't network-coupled
   const [rtspUrl, setRtspUrl] = useState(settings.rtsp_url);
+  const [rtspUsername, setRtspUsername] = useState(settings.rtsp_username ?? '');
+  const [rtspPassword, setRtspPassword] = useState(settings.rtsp_password ?? '');
   const [tcpUrl, setTcpUrl] = useState(settings.tcp_url);
   const [udpPort, setUdpPort] = useState(settings.udp_port);
 
@@ -40,9 +42,11 @@ const VideoSettingsPanel = () => {
 
   useEffect(() => {
     setRtspUrl(settings.rtsp_url);
+    setRtspUsername(settings.rtsp_username ?? '');
+    setRtspPassword(settings.rtsp_password ?? '');
     setTcpUrl(settings.tcp_url);
     setUdpPort(settings.udp_port);
-  }, [settings.rtsp_url, settings.tcp_url, settings.udp_port]);
+  }, [settings.rtsp_url, settings.rtsp_username, settings.rtsp_password, settings.tcp_url, settings.udp_port]);
 
   const labelStyle = { display: 'block', fontSize: 12, color: '#9ca3af', marginBottom: 4 };
   const inputStyle = {
@@ -99,6 +103,11 @@ const VideoSettingsPanel = () => {
           }}
         >
           {banner}
+          {state.fail_count > 0 && (
+            <span style={{ marginLeft: 8, opacity: 0.7 }}>
+              (retry #{state.fail_count})
+            </span>
+          )}
         </div>
       )}
 
@@ -130,18 +139,43 @@ const VideoSettingsPanel = () => {
       </div>
 
       {settings.video_source === 'RTSP' && (
-        <div style={rowStyle}>
-          <div style={colStyle}>
-            <label style={labelStyle}>RTSP URL</label>
-            <input
-              style={inputStyle}
-              value={rtspUrl}
-              placeholder="rtsp://192.168.1.10:8554/stream"
-              onChange={(e) => setRtspUrl(e.target.value)}
-              onBlur={() => rtspUrl !== settings.rtsp_url && patchSettings({ rtsp_url: rtspUrl })}
-            />
+        <>
+          <div style={rowStyle}>
+            <div style={colStyle}>
+              <label style={labelStyle}>RTSP URL</label>
+              <input
+                style={inputStyle}
+                value={rtspUrl}
+                placeholder="rtsp://192.168.1.10:8554/stream"
+                onChange={(e) => setRtspUrl(e.target.value)}
+                onBlur={() => rtspUrl !== settings.rtsp_url && patchSettings({ rtsp_url: rtspUrl })}
+              />
+            </div>
           </div>
-        </div>
+          <div style={rowStyle}>
+            <div style={colStyle}>
+              <label style={labelStyle}>Username (optional)</label>
+              <input
+                style={inputStyle}
+                value={rtspUsername}
+                placeholder="leave blank if not required"
+                onChange={(e) => setRtspUsername(e.target.value)}
+                onBlur={() => rtspUsername !== (settings.rtsp_username ?? '') && patchSettings({ rtsp_username: rtspUsername })}
+              />
+            </div>
+            <div style={colStyle}>
+              <label style={labelStyle}>Password (optional)</label>
+              <input
+                style={inputStyle}
+                type="password"
+                value={rtspPassword}
+                placeholder="leave blank if not required"
+                onChange={(e) => setRtspPassword(e.target.value)}
+                onBlur={() => rtspPassword !== (settings.rtsp_password ?? '') && patchSettings({ rtsp_password: rtspPassword })}
+              />
+            </div>
+          </div>
+        </>
       )}
 
       {(settings.video_source === 'UDP_H264' ||
@@ -194,6 +228,13 @@ const VideoSettingsPanel = () => {
           checked={settings.grid_lines}
           onChange={(v) => patchSettings({ grid_lines: v })}
         />
+        {settings.video_source === 'RTSP' && (
+          <Toggle
+            label="Force TCP transport"
+            checked={settings.rtsp_tcp_transport ?? false}
+            onChange={(v) => patchSettings({ rtsp_tcp_transport: v })}
+          />
+        )}
       </div>
 
       <div style={rowStyle}>

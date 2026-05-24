@@ -252,9 +252,12 @@ class MissionManager:
             self._commit_history()
             return False
 
-        # 2. Upload each item — 10 retries at 0.45s each (matches MP setWPAsync)
+        # 2. Upload each item — 10 retries, up to 1.5s per attempt.
+        # ArduPilot commonly sends INVALID_SEQUENCE alongside REQUEST for the same item;
+        # we drain those inline without re-sending, and only re-send on a genuine timeout.
         seq_to_send = req.seq
         self._set_transfer(phase="UPLOADING_ITEMS", current=int(seq_to_send))
+        self.clear_queue()
         while seq_to_send < len(items):
             item = items[seq_to_send]
             item_sent = False
@@ -262,47 +265,43 @@ class MissionManager:
                 if attempt > 0: retries += 1
                 mav.mission_item_int_send(
                     sysid, compid,
-                    item.seq,
-                    item.frame,
-                    item.command,
-                    item.current,
-                    item.autocontinue,
+                    item.seq, item.frame, item.command,
+                    item.current, item.autocontinue,
                     item.param1, item.param2, item.param3, item.param4,
                     int(item.lat * 1e7), int(item.lng * 1e7), item.alt,
                     mission_type_value
                 )
-                msg = await self.wait_for_message(
-                    ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
-                    timeout=0.45, expected_mission_type=mission_type_value)
-                if msg:
+                # Drain INVALID_SEQUENCE ACKs inline; only exit on REQUEST, ACCEPTED, fatal ACK, or timeout.
+                drain_end = asyncio.get_event_loop().time() + 1.5
+                while True:
+                    remaining = drain_end - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break  # genuine timeout → outer for-loop will retry
+                    msg = await self.wait_for_message(
+                        ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
+                        timeout=remaining, expected_mission_type=mission_type_value)
+                    if not msg:
+                        break  # timeout
                     if msg.get_type() in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
                         seq_to_send = msg.seq
                         self._set_transfer(current=int(min(max(seq_to_send, 0), len(items))), retries=retries)
                         item_sent = True
                         break
-                    elif msg.get_type() == 'MISSION_ACK':
-                        ack_type = int(getattr(msg, 'type', -1))
-                        if ack_type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
-                            logger.info("Mission upload successful!")
-                            self._set_transfer(phase="DONE", ok=True, current=len(items), last_ack=ack_type, error="", mission_version=uuid.uuid4().hex[:8], duration_s=time.time() - start_time, retries=retries)
-                            self._commit_history()
-                            return True
-                        elif ack_type == mavutil.mavlink.MAV_MISSION_INVALID_SEQUENCE:
-                            # Vehicle confused about sequence — wait for it to tell us what it wants
-                            logger.warning(f"MISSION_INVALID_SEQUENCE at item {seq_to_send}, waiting for vehicle REQUEST...")
-                            recovery = await self.wait_for_message(
-                                ['MISSION_REQUEST_INT', 'MISSION_REQUEST'],
-                                timeout=1.5, expected_mission_type=mission_type_value)
-                            if recovery:
-                                seq_to_send = recovery.seq
-                                self._set_transfer(current=int(min(max(seq_to_send, 0), len(items))), retries=retries)
-                                item_sent = True
-                            break  # restart the per-item loop from new seq
-                        else:
-                            logger.error(f"Mission upload failed with ACK type {ack_type}")
-                            self._set_transfer(phase="FAILED", ok=False, current=int(seq_to_send), last_ack=ack_type, error="ack_rejected", duration_s=time.time() - start_time, retries=retries)
-                            self._commit_history()
-                            return False
+                    ack_type = int(getattr(msg, 'type', -1))
+                    if ack_type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        logger.info("Mission upload successful!")
+                        self._set_transfer(phase="DONE", ok=True, current=len(items), last_ack=ack_type, error="", mission_version=uuid.uuid4().hex[:8], duration_s=time.time() - start_time, retries=retries)
+                        self._commit_history()
+                        return True
+                    elif ack_type == mavutil.mavlink.MAV_MISSION_INVALID_SEQUENCE:
+                        continue  # drain and keep waiting within this attempt
+                    else:
+                        logger.error(f"Mission upload failed with ACK type {ack_type}")
+                        self._set_transfer(phase="FAILED", ok=False, current=int(seq_to_send), last_ack=ack_type, error="ack_rejected", duration_s=time.time() - start_time, retries=retries)
+                        self._commit_history()
+                        return False
+                if item_sent:
+                    break
 
             if not item_sent and seq_to_send >= len(items):
                 break

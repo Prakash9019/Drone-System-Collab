@@ -3,6 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+
+# GStreamer (gi) needs Homebrew's dylibs on macOS — inject before any gi import
+if os.uname().sysname == "Darwin":
+    _brew_lib = "/opt/homebrew/lib"
+    _dyld = os.environ.get("DYLD_LIBRARY_PATH", "")
+    if _brew_lib not in _dyld:
+        os.environ["DYLD_LIBRARY_PATH"] = f"{_brew_lib}:{_dyld}".rstrip(":")
 import shlex
 import shutil
 import tempfile
@@ -300,6 +307,7 @@ async def fence_status():
         "radius": float(params.get("FENCE_RADIUS", 0.0)),
         "alt_max": float(params.get("FENCE_ALT_MAX", 0.0)),
         "alt_min": float(params.get("FENCE_ALT_MIN", 0.0)),
+        "margin": float(params.get("FENCE_MARGIN", 2.0)),
     }
 
 class FenceConfigRequest(BaseModel):
@@ -308,6 +316,7 @@ class FenceConfigRequest(BaseModel):
     radius: float
     alt_max: float
     alt_min: float
+    margin: float = 2.0
 
 @app.post("/fence/config")
 async def fence_config(req: FenceConfigRequest):
@@ -316,12 +325,22 @@ async def fence_config(req: FenceConfigRequest):
     if not parameter_manager:
         raise HTTPException(status_code=500, detail="Parameter manager not initialized")
 
+    if req.radius > 0 and req.margin >= req.radius:
+        raise HTTPException(
+            status_code=400,
+            detail=f"FENCE_MARGIN ({req.margin}m) must be less than FENCE_RADIUS ({req.radius}m). ArduPilot rejects this configuration with 'Circle FENCE_MARGIN is greater than FENCE_RADIUS'."
+        )
+
+    # Write order matters: set FENCE_RADIUS before FENCE_MARGIN so ArduPilot never sees
+    # margin >= radius mid-write, then enable last so the fence activates only after all
+    # parameters are consistent.
     writes = [
-        ("FENCE_ENABLE", 1.0 if req.enabled else 0.0),
         ("FENCE_ACTION", float(req.action)),
-        ("FENCE_RADIUS", float(req.radius)),
         ("FENCE_ALT_MAX", float(req.alt_max)),
         ("FENCE_ALT_MIN", float(req.alt_min)),
+        ("FENCE_RADIUS", float(req.radius)),
+        ("FENCE_MARGIN", float(req.margin)),
+        ("FENCE_ENABLE", 1.0 if req.enabled else 0.0),
     ]
     failures = []
     for param_id, value in writes:

@@ -13,21 +13,21 @@ const API_URL = 'http://localhost:8080';
 const STATIC_CONN_VALUES = ['auto', 'udp:127.0.0.1:14550', 'tcp:127.0.0.1:5760', '/dev/tty.SIYI-6801129585'];
 
 const STATE_COLORS = {
-  ACTIVE:            '#10b981',
-  CONNECTED:         '#3b82f6',
-  CONNECTING:        '#f59e0b',
+  ACTIVE: '#10b981',
+  CONNECTED: '#3b82f6',
+  CONNECTING: '#f59e0b',
   WAITING_FOR_HEARTBEAT: '#f59e0b',
-  RECONNECTING:      '#f97316',
-  HEARTBEAT_LOST:    '#ef4444',
-  DISCONNECTED:      '#6b7280',
+  RECONNECTING: '#f97316',
+  HEARTBEAT_LOST: '#ef4444',
+  DISCONNECTED: '#6b7280',
 };
 
 const FlightData = () => {
-  const wsConnected      = useTelemetryStore(s => s.connected);
-  const connectionState  = useTelemetryStore(s => s.connectionState);
-  const connectInFlight  = useTelemetryStore(s => s.connectRequestInFlight);
-  const startConnection  = useTelemetryStore(s => s.startConnection);
-  const stopConnection   = useTelemetryStore(s => s.stopConnection);
+  const wsConnected = useTelemetryStore(s => s.connected);
+  const connectionState = useTelemetryStore(s => s.connectionState);
+  const connectInFlight = useTelemetryStore(s => s.connectRequestInFlight);
+  const startConnection = useTelemetryStore(s => s.startConnection);
+  const stopConnection = useTelemetryStore(s => s.stopConnection);
   const sendShortcutCommand = useTelemetryStore((s) => s.sendShortcutCommand);
   const connectionConfig = useTelemetryStore((s) => s.connectionConfig);
   const setConnectionConfig = useTelemetryStore((s) => s.setConnectionConfig);
@@ -40,6 +40,9 @@ const FlightData = () => {
   const operationalHistory = useTelemetryStore((s) => s.operationalHistory);
   const setFlightMode = useTelemetryStore((s) => s.setFlightMode);
   const missionPlannedTotal = useMissionStore((s) => s.missionPlannedTotal);
+  const plannedWaypoints = useMissionStore((s) => s.waypoints);
+  const missionSavedSlot = useMissionStore((s) => s._missionSaved);
+  const missionSyncStatus = useTelemetryStore((s) => s.missionSyncStatus);
 
   const vehicle = useTelemetryStore(selectPrimaryVehicle);
   const connState = connectionState || vehicle?.connection_state || 'DISCONNECTED';
@@ -121,6 +124,25 @@ const FlightData = () => {
 
   const applyFlightMode = async (modeName) => {
     if (!modeName || !isActive) return;
+    // Pre-flight check matching Mission Planner: refuse AUTO if the planned mission has no
+    // TAKEOFF cmd. Hitting AUTO with no takeoff is what surfaces "Auto: Missing Takeoff Cmd"
+    // followed by "Mode change to Auto failed: init failed" in the autopilot log.
+    if (String(modeName).toUpperCase() === 'AUTO') {
+      const planned = (plannedWaypoints?.length ? plannedWaypoints : missionSavedSlot) || [];
+      const cmds = planned.map((w) => Number(w.command));
+      const hasTakeoff = cmds.includes(22);
+      const gpsValid = Number(vehicle?.status?.gps_fix ?? 0) >= 2;
+      const homeValid = Boolean(vehicle?.home?.valid);
+      const blockers = [];
+      if (!planned.length) blockers.push('no mission uploaded (go to Flight Planner → WRITE)');
+      else if (!hasTakeoff) blockers.push('mission has no TAKEOFF (cmd 22)');
+      if (!gpsValid) blockers.push('no GPS fix');
+      if (!homeValid) blockers.push('HOME_POSITION not yet received');
+      if (blockers.length) {
+        setCmdBanner(`AUTO blocked — ${blockers.join('; ')}`);
+        return;
+      }
+    }
     setModeApplying(true);
     setCmdBanner('');
     try {
@@ -243,7 +265,7 @@ const FlightData = () => {
             }}
             disabled={busy || connectInFlight || isActive}
             className="status-search"
-            style={{ width: 200, height: 34 }}
+            style={{ width: 100, height: 34 }}
           >
             <option value="auto">AUTO</option>
             <option value="udp:127.0.0.1:14550">UDP SITL</option>
@@ -267,7 +289,7 @@ const FlightData = () => {
               placeholder="udp:14550 / COM3 / dev path"
               value={
                 connectionConfig.connection_string &&
-                !presetConnSet.has(connectionConfig.connection_string)
+                  !presetConnSet.has(connectionConfig.connection_string)
                   ? connectionConfig.connection_string
                   : ''
               }
@@ -377,6 +399,11 @@ const FlightData = () => {
               commandHistory={commandHistory}
               missionSeq={Number(vehicle?.mission?.current_seq ?? -1)}
               missionTotal={missionPlannedTotal}
+              plannedWaypoints={plannedWaypoints?.length ? plannedWaypoints : missionSavedSlot}
+              vehicleAltRel={vehicle?.position?.alt_rel}
+              vehicleGroundSpeed={vehicle?.velocity?.groundspeed}
+              vehicleWpDist={vehicle?.navigation?.wp_dist}
+              missionSyncStatus={missionSyncStatus}
             />
           </div>
         </div>
@@ -394,6 +421,18 @@ const FlightData = () => {
               >
                 {vehicle?.status?.armed ? 'DISARM' : 'ARM'}
               </button>
+              {!vehicle?.status?.armed && (
+                <button
+                  className="btn-action btn-arm"
+                  type="button"
+                  style={{ opacity: 0.75, fontSize: '0.75em' }}
+                  onClick={() => runShortcut('force_arm')}
+                  disabled={armBusy}
+                  title="Bypasses pre-arm checks (SITL / simulation use only)"
+                >
+                  FORCE ARM
+                </button>
+              )}
               <button
                 className="btn-action"
                 type="button"

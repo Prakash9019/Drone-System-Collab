@@ -55,10 +55,13 @@ class WebRTCPeer:
             self._payloader.set_property("config-interval", -1)  # SPS/PPS in-band on every IDR
             self._payloader.set_property("pt", 96)
             self._payloader.set_property("aggregate-mode", 1)
+            # profile-level-id intentionally omitted — it's stream-dependent and derived from
+            # the SPS NALU at runtime; hardcoding it causes caps-negotiation failure when the
+            # source profile differs (e.g. Baseline 3.0 vs 3.1).
             payload_caps = (
                 "application/x-rtp, media=(string)video, encoding-name=(string)H264,"
                 " payload=(int)96, clock-rate=(int)90000,"
-                " packetization-mode=(string)1, profile-level-id=(string)42e01f"
+                " packetization-mode=(string)1"
             )
         else:
             self._payloader = self._make("rtph265pay")
@@ -94,8 +97,8 @@ class WebRTCPeer:
         self._capsfilter.link(self._webrtc)
 
     # ─── Gst helpers ───────────────────────────────────────────────────────
-    def _make(self, factory: str) -> Any:
-        el = self._Gst.ElementFactory.make(factory, None)
+    def _make(self, factory: str, name: str | None = None) -> Any:
+        el = self._Gst.ElementFactory.make(factory, name)
         if el is None:
             raise RuntimeError(f"GStreamer element '{factory}' not available")
         return el

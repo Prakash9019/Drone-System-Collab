@@ -51,7 +51,19 @@ Start all three services (separate terminals):
 ```bash
 # Terminal 1 — Python MAVLink service (port 8000)
 cd drone_gcs/python_service
+source ./venv/bin/activate
+python main.py
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+Create single shared venv
+
+python3 -m venv .venv
+
+STEP 4 — Activate
+
+source .venv/bin/activate
+
+
 
 # Terminal 2 — Node API gateway (port 8080)
 cd drone_gcs/node_api

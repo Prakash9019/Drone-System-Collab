@@ -210,6 +210,7 @@ app.post('/api/rally/upload', async (req, res) => {
 // Command route mapping common text commands to MAVLink COMMAND_LONG ids
 const COMMAND_MAP = {
   'arm': { command: 400, p1: 1 }, // MAV_CMD_COMPONENT_ARM_DISARM
+  'force_arm': { command: 400, p1: 1, p2: 21196 }, // Force arm — bypasses ArduPilot pre-arm checks (SITL / debug only)
   'disarm': { command: 400, p1: 0 },
   'rtl': { command: 20 }, // MAV_CMD_NAV_RETURN_TO_LAUNCH
   'land': { command: 21 }, // MAV_CMD_NAV_LAND

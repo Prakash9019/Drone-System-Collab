@@ -304,6 +304,23 @@ const AdvancedHUD = ({ vehicleState }) => {
   const vibe = v?.vibration;
   const vibeHigh = vibe?.vibration_x > 30 || vibe?.vibration_y > 30 || vibe?.vibration_z > 30;
 
+  // HOME ↔ EKF origin drift detector. Mission Planner anchors mission math at the EKF origin
+  // (GPS_GLOBAL_ORIGIN); if HOME_POSITION later drifts from it, waypoint math, RTL, and the
+  // map "where is the drone" can disagree. Flag >10 m drift loudly.
+  const home = v?.home;
+  const origin = v?.ekf_origin;
+  let originDriftM = null;
+  if (home?.valid && origin?.valid) {
+    const R = 6378137.0;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(origin.lat - home.lat);
+    const dLng = toRad(origin.lng - home.lng);
+    const a = Math.sin(dLat / 2) ** 2
+      + Math.cos(toRad(home.lat)) * Math.cos(toRad(origin.lat)) * Math.sin(dLng / 2) ** 2;
+    originDriftM = 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+  const originDriftWarn = originDriftM != null && originDriftM > 10;
+
   // GPS label
   const gpsText = (() => {
     if (gpsfix >= 6) return `RTK Fixed ${sats}`;
@@ -390,6 +407,14 @@ const AdvancedHUD = ({ vehicleState }) => {
         <span className="hud2-sep">|</span>
         <span style={{ color: ekfColor }}>EKF</span>
         {vibeHigh && <><span className="hud2-sep">|</span><span style={{ color: '#f59e0b' }}>Vibe</span></>}
+        {originDriftWarn && (
+          <>
+            <span className="hud2-sep">|</span>
+            <span style={{ color: '#f59e0b' }} title={`HOME ↔ EKF origin drift: ${Math.round(originDriftM)} m`}>
+              HOME≠ORIGIN {Math.round(originDriftM)}m
+            </span>
+          </>
+        )}
         <span className="hud2-sep">|</span>
         <span style={{ color: gpsColor }}>GPS: {gpsText}</span>
         {mode && (
