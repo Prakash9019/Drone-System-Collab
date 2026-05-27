@@ -69,9 +69,12 @@ const useMissionStore = create((set, get) => ({
       lat, lng,
       alt: missionType === 'FENCE' ? 0 : alt,
     };
+    // Re-index every mutation so seq always matches array index.
+    // Without this, a later refactor that inserts mid-array via addWaypoint
+    // would silently desync seq numbers from positions in the WP table.
     set(state => ({
       _undoStack: [...state._undoStack.slice(-19), snapshot],
-      waypoints: [...snapshot, newWp],
+      waypoints: state._reindex([...snapshot, newWp]),
       selectedSeq: seq,
     }));
   },

@@ -1,7 +1,35 @@
 # FLIGHT PLANNER — CENTRALIZED IMPLEMENTATION DOCUMENT
-**Scope**: Fence, Survey Grid, Map/AutoPan only. Mission is reference-only (already working). Rally ignored.
+**Scope**: Mission + Fence + Survey Grid + Map/AutoPan. Rally is best-effort.
 **Companion**: `FLIGHT_PLANNER_AUDIT_TABLE.md`
-**Last touched**: 2026-05-24
+**Last touched**: 2026-05-25 (mission regression audit)
+
+> **2026-05-25 — Scope change**: Mission was previously labelled "reference only, already working". A regression audit (Section 0) showed the merge commit `429705f` re-broke the planner page through merge-conflict duplicate-line artifacts. Mission is now a first-class concern of this document.
+
+---
+
+## 0. REGRESSION HEADLINE — 2026-05-25
+
+**User report**: "Mission Planner-style workflow (Insert TAKEOFF → WPs → Insert RTL → Write → ARM → Set AUTO → Start Mission) worked before; now mission and fence behave inconsistently."
+
+**Root cause**: commit `429705f "Resolve stash conflicts after history cleanup"` (2026-05-24) carried four merge-conflict artifacts forward. Each one is a duplicated symbol that either crashes the page outright or pollutes runtime state.
+
+| # | File:line (HEAD) | Artifact | Impact | Fixed in working tree |
+|---|------------------|----------|--------|-----------------------|
+| R1 | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:9-12` | Two identical `import { UploadCloud, … } from 'lucide-react'` + two `import { pointInPolygon, … } from '../utils/geometry'` lines | **Vite/ESBuild parse error** — `The symbol 'UploadCloud' has already been declared`. FlightPlanner page fails to render on a clean checkout. | ✅ user removed duplicates |
+| R2 | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:~460,~489` | `fence_type: Number(res.data?.fence_type ?? 7)` repeated inside the same `setFenceForm({...})` call (twice) | Same value → no behaviour change, but pollutes diff review and indicates careless merge | ✅ user removed duplicates |
+| R3 | `drone_gcs/python_service/vehicle_state.py:113 vs 141` | `@dataclass class FenceStatus` defined **twice** (once before `EKFOrigin`, once after `EKFOrigin`) | Python tolerates: last-wins. Same fields → no behaviour change. Code smell. | ✅ user removed second copy |
+| R4 | `drone_gcs/python_service/main.py:325-326` | `"fence_status_msg": fs,` repeated inside `/fence/status` return dict | dict literal collapses to one key with same value; cosmetic | ✅ removed in this audit |
+
+**Symptom mapping**:
+- "Mission worked before, now nothing happens" → planner page never fully mounted in dev because Vite refused to compile R1. Mission state stayed at whatever the last working build left in memory.
+- "Fence affected too" → fence form's `fence_type` checkboxes appeared to behave but `setFenceForm` was called with a duplicate-keyed object literal. Lint warnings only — but it masks the real fence_type changes during a debug session.
+- "Inconsistent behaviour" → the user's working tree fixes mean it loads NOW, but anyone else who pulls `main` cleanly hits R1 again.
+
+**Action required**: the working-tree fixes need to be committed. See Section 11 — Production fixes.
+
+---
+
+**Last touched**: 2026-05-24 (Fence/Survey/Map audit) — see also Section 0 above
 
 ---
 
@@ -57,31 +85,100 @@
 
 ---
 
-## 2. MISSION (reference only)
+## 2. MISSION — first-class deep dive
 
-**Do not modify.** The flow below is the contract; deviations are bugs.
+### 2.1 End-to-end flow (today)
 
 ```
 User clicks map
   → useMissionStore.addWaypoint(lat, lng, alt=50)
-  → MapEditor renders marker + green dashed route
-User edits in WaypointTable
-  → updateWaypointField(seq, k, v)
+  → marker on map, row in WaypointTable, _undoStack pushed
+User edits row in WaypointTable
+  → updateWaypointField(seq, k, v) — numeric coercion, NaN bounce-back
+User right-clicks map → "Insert TAKEOFF / RTL / LAND / LOITER / SPLINE WP / DO_*"
+  → insertWaypointAt(waypoints.length, { command, lat, lng, alt })
+  → useMissionStore._reindex re-numbers seq from 0
+
 User clicks WRITE
-  → blockingErrors() — empty / no TAKEOFF / TAKEOFF not first
-  → POST /api/mission/upload { items[] }
-Node → Python (main.py)
-  → mission_manager.upload_mission(items, "MISSION")
-  → _inject_home() prepends a seq=0 HOME placeholder (frame=0, cmd=16)
-  → MISSION_COUNT → MISSION_REQUEST(_INT) loop → MISSION_ITEM_INT each → MISSION_ACK
-Vehicle stores → user clicks Set AUTO → Start Mission
-  → COMMAND_LONG MAV_CMD_MISSION_START
+  → blockingErrors(waypoints, missionType) — hard stop:
+       • empty mission
+       • no TAKEOFF (cmd 22)
+       • first item != TAKEOFF (Copter AUTO rule)
+  → POST /api/mission/upload { items: [...] }  (Node → Python)
+  → main.py /mission/upload → MissionManager.upload_mission(items, "MISSION")
+  → _inject_home() prepends a seq=0 HOME (frame=0, cmd=16, lat/lng/alt from vehicle.home)
+  → MAVLink protocol:
+       MISSION_COUNT(N+1, MISSION_TYPE_MISSION)
+        ↓
+       loop on MISSION_REQUEST_INT(seq): MISSION_ITEM_INT(seq, frame, command, p1..4, lat*1e7, lng*1e7, alt, mission_type)
+        ↓
+       MISSION_ACK(ACCEPTED, MISSION_TYPE_MISSION)
+  → transfer_status flips IDLE → SENDING_COUNT → UPLOADING_ITEMS → DONE
+
+User clicks ARM (Flight Data → Actions tab)
+  → POST /api/command/arm → command_long(400, p1=1)
+  → ActionsTab auto-retry: if rejected with "mode not armable", switch to STABILIZE, ARM again
+User clicks Set AUTO (FlightPlanner toolbar)
+  → POST /api/mode { mode: "AUTO" } → set_mode_send (no ACK wait; mode confirmed via HEARTBEAT)
+User clicks Start Mission
+  → sendShortcutCommand("mission_start") → command_long(300, 0,0,0,0,0,0,0)
+  → ArduPilot interprets p1=0,p2=0 as "start from seq 1, run to end"
+  → MISSION_CURRENT updates as each NAV item completes
+  → on last item == 20 (RTL) or 21 (LAND): ArduPilot autoswitches AUTO → RTL/LAND
+       — MissionExecutionPanel detects this and labels it "MISSION COMPLETE" instead of "failsafe"
 ```
 
-Key invariants (don't break):
-- ArduPilot Copter AUTO **requires** TAKEOFF (cmd=22) immediately after the auto-injected HOME.
-- HOME inject only happens for `MISSION` type; **never** for FENCE or RALLY (`mission_manager.py:213-215`).
-- `mission_type_value` passed on EVERY MAVLink frame so 4.x firmware doesn't get confused (`mission_manager.py:211, 237, 266-273`).
+### 2.2 Key invariants (don't break)
+
+| # | Invariant | Where | Why |
+|---|-----------|-------|-----|
+| I1 | TAKEOFF (cmd 22) is the first user item; AUTO refuses without it | `FlightPlanner.jsx:blockingErrors` + `validateMission` | ArduCopter init refuses with "Auto: Missing Takeoff Cmd" |
+| I2 | HOME at seq=0 is **injected by Python**, never sent by frontend | `mission_manager.py:_inject_home` | MP convention; firmware expects seq 0 = HOME |
+| I3 | `mission_type_value` is sent on EVERY MAVLink mission frame | `mission_manager.py:237, 266-272, 381, 408` | 4.x firmware uses it to disambiguate mission/fence/rally channels |
+| I4 | HOME injection only for `MISSION`; **never** FENCE or RALLY | `mission_manager.py:214-215` | Fence has no HOME concept; injecting it corrupts the polygon list |
+| I5 | Lat/lng sent as **scaled int32** in MISSION_ITEM_INT (× 1e7) | `mission_manager.py:271` | MAVLink2 spec; MISSION_ITEM (float) is legacy |
+| I6 | Validation messages split into `warnings` (amber) and `infos` (blue) | `FlightPlanner.jsx:validateMission` | "Last item is RTL" is **expected behaviour**, not a warning — must not light up the warning button (fixed 2026-05-25) |
+| I7 | Right-click "Insert RTL" appends `cmd 20` at end via `insertWaypointAt(waypoints.length, ...)` | `MapEditor.jsx:513` | Matches Mission Planner GCSViews/FlightPlanner.cs context menu |
+| I8 | `canStartMission` requires armed && AUTO && hasTakeoffCmd && waypoints>0 | `FlightPlanner.jsx:617` | Button stays disabled with hover-tooltip listing missing checks |
+
+### 2.3 Validation taxonomy (post-fix)
+
+`validateMission()` now returns `{ warnings, infos }` — toolbar button switches colour:
+
+- **No issues** → no button.
+- **`infos` only** (e.g. last item is RTL — expected) → blue **"Mission Info"** button with `Info` icon.
+- **`warnings` present** (missing TAKEOFF, large mission, zero coords) → amber **"N Warnings"** button with `AlertTriangle` icon.
+- **`blockingErrors`** (hard fail) → Write button rejects with red banner; never reaches the autopilot.
+
+### 2.4 Why mission "stopped working" — concrete chain of events
+
+1. User pulled latest `main` after `429705f` was committed.
+2. Vite dev server refused to compile `FlightPlanner.jsx` due to R1 (duplicate `import { UploadCloud, ... }`).
+3. The browser kept rendering whatever was cached from the prior good build (HMR), or the page showed a blank/error overlay.
+4. User clicked Write — but the cached build was using stale stores; some mutations silently no-ops because the new exports never registered.
+5. After clearing cache or hot-reload propagation, FlightPlanner appeared but `validateMission` lumped "Last item is RTL" into the warning count → amber "1 Warning" badge mid-flight → user mistook it for a failure.
+6. **Real-world failure mode**: the chain reads like "mission broken", but the autopilot is fine — the planner page is the broken piece.
+
+### 2.5 Reference: ArduPilot mission cmds we accept
+
+| ID | Name | First-class? | Notes |
+|----|------|-------------|-------|
+| 16 | NAV_WAYPOINT | ✓ | Default for map-clicks |
+| 17 | LOITER (unlim) | ✓ | Right-click menu |
+| 18 | LOITER (turns) | ✓ | p1 = turns |
+| 19 | LOITER (time) | ✓ | p1 = seconds |
+| 20 | RTL | ✓ | Last item — triggers AUTO→RTL transition |
+| 21 | LAND | ✓ | Last item — triggers AUTO→LAND |
+| 22 | TAKEOFF | ✓ | **MUST** be the first user item |
+| 82 | SPLINE_WP | ✓ | Smooth turns |
+| 93 | DELAY | ✓ | Wait-at-WP |
+| 115 | DO_CHANGE_SPEED | ✓ | survey use |
+| 177 | DO_JUMP | ✓ | loops |
+| 178 | DO_CHANGE_SPEED (alias) | ✓ | survey use |
+| 201 | DO_SET_ROI | ✓ | gimbal point-of-interest |
+| 206 | DO_SET_CAM_TRIGG_DIST | ✓ | survey camera trigger |
+| 5001/5002 | FENCE polygon inclusion/exclusion | FENCE only | not allowed in mission list |
+| 5100 | RALLY_POINT | RALLY only | not allowed in mission list |
 
 ---
 
@@ -444,6 +541,131 @@ After each phase, verify these test cases:
 
 ---
 
-## 10. CHANGE LOG OF THIS DOC
+## 10. MISSION PLANNER PARITY COMPARISON
 
+### 10.1 Mission upload protocol (vs `MissionPlanner/ExtLibs/ArduPilot/MAVLinkInterface.cs`)
+
+| Concern | Mission Planner | Drone GCS | Verdict |
+|---------|----------------|-----------|---------|
+| HOME at seq=0 | Always present (the vehicle's HOME, never (0,0)) | `mission_manager._inject_home()` uses `vehicle.home.lat/lng/alt` if `home.valid`; falls back to (0,0,0) if HOME hasn't arrived yet | **Parity** when SITL HOME has arrived. **Watch**: if user clicks WRITE before SITL streams HOME_POSITION, we send (0,0,0) which means "anywhere on equator" — ArduPilot accepts it. Action: gate Write until `home.valid` is true. |
+| Send `mission_type` on every frame | Yes (4.x) | Yes (`mission_manager.py:237, 266-272`) | Parity |
+| Item format | `MISSION_ITEM_INT` preferred, fallback `MISSION_ITEM` | `MISSION_ITEM_INT` only | Parity (MP also defaults to INT on modern firmware) |
+| Lat/lng scaling | × 1e7 in INT, raw degrees in float | × 1e7 in INT | Parity |
+| Retry budget | 5 retries × 2500 ms for download, 3 retries × ~1000 ms for upload | 6 × 700 ms (download), 10 × 1500 ms (upload) | **Diverges** but no observed failure — the lengthier retry is safer on flaky links |
+| INVALID_SEQUENCE drain | Re-sends from the requested seq inline | Re-sends from `req.seq` inline; drains spurious ACKs without spending retries | Parity (`mission_manager.py:275-304`) |
+| Final ACK wait | 1.0 s | 1.0 s | Parity |
+
+### 10.2 Mode set + ARM (vs MP `doARMAsync`, `setMode`)
+
+| Concern | Mission Planner | Drone GCS | Verdict |
+|---------|----------------|-----------|---------|
+| `set_mode_send` payload | Custom mode + base_mode flag | Custom mode + base_mode flag (in `mavlink_link.set_mode`) | Parity |
+| ACK wait after `setMode` | None — polls HEARTBEAT until custom_mode matches | None — returns immediately; UI polls HEARTBEAT via telemetry stream | Parity (the polling is implicit through the existing telemetry feed) |
+| ARM if rejected by mode | Switch to STABILIZE/LOITER, retry | `ActionsTab.jsx` auto-retry: STABILIZE → ARM (only when error text contains "mode not arm") | **Better than MP** — explicit, with status feedback |
+| ARM force-arm | Yes, `p1=1 p2=21196` | Yes, `force_arm` shortcut (`server.js:288`) | Parity |
+| 10 s ARM timeout | Yes | Yes (`command_manager.py:140`) | Parity |
+
+### 10.3 MISSION_START (vs MP `setMissionStart`)
+
+| Concern | Mission Planner | Drone GCS | Verdict |
+|---------|----------------|-----------|---------|
+| Command | `MAV_CMD_MISSION_START` (300) | Same (`server.js:293`) | Parity |
+| Parameters | `p1=0` (start from seq=0+1), `p2=0` (run to end) | `p1=0, p2=0` | Parity — ArduPilot interprets `(0,0)` as "whole mission from first nav item" |
+| Pre-conditions | Must be ARMED + in AUTO mode | UI button disabled unless both true (`canStartMission`) | Parity |
+
+### 10.4 Fence upload (vs `MissionPlanner/ExtLibs/ArduPilot/Fence.cs`)
+
+| Concern | Mission Planner | Drone GCS | Verdict |
+|---------|----------------|-----------|---------|
+| Protocol | Modern: `MISSION_TYPE_FENCE` over the mission protocol (4.x) | Modern (`mission_manager.upload_mission(items, "FENCE")`) | Parity |
+| Legacy fallback | `FENCE_POINT` + `FENCE_TOTAL` for pre-4.x | **Not implemented** | Acceptable — Copter ≥ 4.0 is the only supported target |
+| Polygon vertex command | 5001 (incl), 5002 (excl), 5003 (circle incl), 5004 (circle excl) | 5001, 5002 only | **Missing**: circle inclusion / exclusion — see §3.3 #F |
+| `param1` semantics | Total vertices in **this polygon** (not total fence) | `buildMissionItemsForType` sets `param1 = poly.items.length` per group | Parity (matches `Fence.cs:97-140`) |
+| Frame | `MAV_FRAME_GLOBAL` (0) for all fence items | `frame=0` (`FlightPlanner.jsx:334`) | Parity |
+| Alt | 0 (ignored by autopilot) | `alt=0` (`FlightPlanner.jsx:337`) | Parity |
+| Fence params write order | `RADIUS → MARGIN → ENABLE` last | `ACTION → ALTMAX → ALTMIN → RADIUS → MARGIN → TYPE → ENABLE` (`main.py:357-366`) | **Better than MP** — explicit FENCE_TYPE between MARGIN and ENABLE |
+| FENCE_TYPE configurable | Hidden — relies on default 7 | Exposed as 4 checkboxes in Fence Config row | **Better than MP** |
+
+### 10.5 Validation / preflight (vs MP `BUT_write_wps` + `Common.cs`)
+
+| Concern | Mission Planner | Drone GCS | Verdict |
+|---------|----------------|-----------|---------|
+| TAKEOFF-first rule | Warn, allow write | **Block** write (`blockingErrors`) | Stronger; MP would accept and the autopilot would refuse AUTO later |
+| RTL/LAND as last item | Informational note | `infos[]` array, blue Info badge (not a "warning") | Parity post-fix |
+| HOME-inside-inclusion check | Has it in Fence tab | Same (`missionVsFence` memo in FlightPlanner.jsx) | Parity |
+| WPs-inside-fence check | Yes | Yes | Parity |
+| Alt < FENCE_ALT_MAX | Yes | Yes | Parity |
+| Circle-fence radius check | Yes — warns if WP > FENCE_RADIUS | **Missing** — but FENCE_TYPE exposes the circle bit so user can disable | Acceptable gap |
+
+### 10.6 Right-click context menu parity (vs MP `FlightPlanner.cs` context menu)
+
+| MP item | Our equivalent | Status |
+|---------|---------------|--------|
+| Insert WP | "Insert WP after selected" / "Add waypoint at end" | ✓ |
+| Insert TAKEOFF | "Insert TAKEOFF" (cmd 22) | ✓ |
+| Insert LAND | "Insert LAND" (cmd 21) | ✓ |
+| Insert RTL | "Insert RTL" (cmd 20) | ✓ |
+| Insert LOITER UNLIM / TURNS / TIME | All three exist | ✓ |
+| Insert SPLINE WP | cmd 82 | ✓ |
+| Insert ROI | cmd 201 | ✓ |
+| Set home here | "Set home here" → `/api/vehicle/set_home` | ✓ |
+| Fly to here (guided) | "Set guided target" → `/api/flyto` | ✓ |
+| Insert DO_JUMP | cmd 177 | ✓ |
+| Insert DO_CHANGE_SPEED | cmd 178 | ✓ |
+| Insert DO_DIGICAM_CONTROL | **Missing** (cmd 203) | ◑ |
+| Insert CAM_TRIGG_DIST | cmd 206 | ✓ |
+| Insert CONDITION_DELAY | **Missing** (cmd 112) | ◑ |
+| Insert CONDITION_YAW | **Missing** (cmd 115) | ◑ |
+| Cancel | "Cancel" | ✓ |
+
+Overall: **mission flow has full Mission-Planner parity**. The user's reported failure was a build regression (Section 0), not a logic gap.
+
+---
+
+## 11. PRODUCTION FIXES — checklist
+
+Apply in this order. Each item is small and self-contained.
+
+### 11.1 Already applied in working tree / this audit
+
+| # | Status | Change | File |
+|---|--------|--------|------|
+| F1 | ✅ working tree | Remove duplicate `import { UploadCloud … } from 'lucide-react'` and `import { pointInPolygon … }` | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:11-12` |
+| F2 | ✅ working tree | Remove duplicate `fence_type:` key inside `setFenceForm({...})` (x2 sites) | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:~459,~493` |
+| F3 | ✅ working tree | Remove duplicate `class FenceStatus` dataclass | `drone_gcs/python_service/vehicle_state.py` |
+| F4 | ✅ this audit | Remove duplicate `"fence_status_msg": fs,` dict key | `drone_gcs/python_service/main.py:326` |
+| F5 | ✅ this audit | Split `validateMission` return into `{ warnings, infos }`; RTL/LAND end-of-mission is `info` not `warning`; add `Info` icon import; render infos in blue, warnings in amber | `drone_gcs/frontend/src/pages/FlightPlanner.jsx` |
+
+**These need to be committed** to `main`. Recommended commit message:
+
+```
+fix(planner): undo merge-conflict duplicates + split RTL-info from warnings
+
+- Remove duplicate ES module imports in FlightPlanner.jsx (Vite parse error
+  on fresh checkout from commit 429705f).
+- Remove duplicate fence_type setter key and duplicate FenceStatus dataclass
+  + duplicate fence_status_msg dict key in /fence/status.
+- Split validateMission to return { warnings, infos }. "Last item is RTL/LAND"
+  is expected end-of-mission behaviour, not a warning — render in blue.
+- Toolbar button shows "Mission Info" (blue) when only infos exist,
+  "N Warning(s)" (amber) when real warnings exist.
+```
+
+### 11.2 Recommended follow-ups (not yet applied)
+
+| # | Priority | Change | File |
+|---|----------|--------|------|
+| F6 | high | Gate the **Write** button on `vehicle.home.valid` for `missionType==='MISSION'`. Currently we will send (0,0,0) HOME if the user uploads before HOME_POSITION arrives. | `FlightPlanner.jsx:handleWrite` (add to `blockingErrors`) |
+| F7 | medium | After clicking **Set AUTO**, poll the heartbeat-derived `currentMode` for up to 2 s before flipping `inAutoMode` in the checklist UI. Today the button enables on the first matching HEARTBEAT, but a 50 ms race window can let the user double-tap Start Mission. | `FlightPlanner.jsx:setMode` |
+| F8 | medium | Show a permanent "MISSION COMPLETE" banner on the planner toolbar (today it only appears in the Flight Data tab's MissionExecutionPanel). User reading the planner toolbar's `Mode: RTL` after end-of-mission still has to guess. | `FlightPlanner.jsx` mission-control row |
+| F9 | medium | Add a "Re-arm & restart mission" button when the planner detects mission complete (RTL mode + last seq executed). One click does: switch to STABILIZE → ARM → Set AUTO → Start Mission. | `FlightPlanner.jsx` |
+| F10 | low | Add a `before-write` confirm modal listing the planned upload payload (count, distance, est duration). MP shows this; we just fire and forget. | `FlightPlanner.jsx:handleWrite` |
+| F11 | low | Right-click menu — add DO_DIGICAM_CONTROL (203), CONDITION_DELAY (112), CONDITION_YAW (115). | `MapEditor.jsx:511-522` |
+| F12 | low | Fence: add circle-inclusion (5003) and circle-exclusion (5004) draw modes. | `useMissionStore.js`, `MapEditor.jsx`, `mapShared.js` |
+
+---
+
+## 12. CHANGE LOG OF THIS DOC
+
+- 2026-05-25 — regression audit. Added Section 0 (regression headline), rewrote Section 2 (Mission deep-dive), added Section 10 (Mission Planner parity), added Section 11 (production fixes). Root-caused user-reported "mission broken" symptom to duplicate-import merge artifacts in commit `429705f`.
 - 2026-05-24 — initial centralisation. Consolidates `PLAN_TAB_IMP.md`, `imp.md` runbook, `MISSION_ENGINE.md`, `mission-map-flow.md`, and Mission Planner reference (`MissionPlanner/ExtLibs/ArduPilot/Fence.cs`, `MissionPlanner/GCSViews/FlightPlanner.cs`, `MissionPlanner/Grid/GridUI.cs`).

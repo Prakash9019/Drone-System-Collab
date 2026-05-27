@@ -1,23 +1,60 @@
 # FLIGHT PLANNER AUDIT TABLE
-**Scope**: Fence + Survey Grid + Map/AutoPan (Mission left untouched, Rally ignored)
-**Date**: 2026-05-24
+**Scope**: Mission + Fence + Survey Grid + Map/AutoPan (Rally is best-effort)
+**Date**: 2026-05-25 (regression audit)
 
-Legend: ✓ exists / ◑ partial / ✗ missing / D duplicated / F fragmented
+Legend: ✓ exists / ◑ partial / ✗ missing / ⚠ broken / D duplicated / F fragmented
 
 ---
 
-## A. MISSION (reference only — DO NOT MODIFY)
+## 0. REGRESSION TABLE — 2026-05-25
+
+| Feature | Exists | Partial | Broken | Root cause | Files |
+|---------|:------:|:-------:|:------:|------------|-------|
+| FlightPlanner page mount on fresh checkout | | | ⚠ R1 | Duplicate `import { UploadCloud … }` and `import { pointInPolygon … }` introduced by merge commit `429705f` — Vite/ESBuild parse error | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:9-12` (HEAD) |
+| Fence config form `fence_type` state | | ◑ R2 | | Duplicate `fence_type:` key inside `setFenceForm({...})` — same value, no behaviour change, but noisy | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:~459,~493` |
+| `VehicleState.fence_status` field | ✓ | D R3 | | Two `class FenceStatus` dataclasses in same module — last-wins | `drone_gcs/python_service/vehicle_state.py:113, 141` (HEAD) |
+| `/fence/status` JSON shape | ✓ | D R4 | | Duplicate `"fence_status_msg": fs,` in return dict | `drone_gcs/python_service/main.py:325-326` |
+| Validation "Last item is RTL" presented as warning | | ◑ F5 | | `validateMission()` pushed informational RTL/LAND messages onto the same `warnings[]` array as real warnings — amber warning button on a correctly configured mission | `drone_gcs/frontend/src/pages/FlightPlanner.jsx:140-141` |
+
+All five issues are addressed; R1/R2/R3 were fixed in the user's working tree, R4/F5 were fixed during this audit. See `FLIGHT_PLANNER_CENTRALIZED.md` §11 for the commit checklist.
+
+**Symptom-to-cause mapping**:
+- "Mission worked before, now it doesn't" → R1 prevented the page from compiling after a `git pull`. The browser kept serving the previous HMR build, so partial functionality persisted across sessions in a confusing way.
+- "Warning shows even though my mission is correct (TAKEOFF…WPs…RTL)" → F5: `validateMission` lumped the expected-end-of-mission note with real warnings.
+
+---
+
+## A. MISSION — full audit
 
 | Feature                              | Status | Files |
 |--------------------------------------|--------|-------|
-| Mission create (map clicks)          | ✓      | `frontend/src/components/MapEditor.jsx:165-168` |
-| Right-click commands (TAKEOFF/LAND/RTL/LOITER/etc.) | ✓ | `MapEditor.jsx:382-449` |
-| Waypoint table edit                  | ✓      | `frontend/src/components/WaypointTable.jsx` |
-| TAKEOFF preflight check + insert     | ✓      | `pages/FlightPlanner.jsx:466-476, 603-612` |
-| MISSION_TYPE_MISSION upload protocol | ✓      | `python_service/mission_manager.py:176-336` |
-| HOME inject at seq=0 (Copter req)    | ✓      | `mission_manager.py:150-174` |
-| AUTO start (mission_start cmd)       | ✓      | `FlightPlanner.jsx:429-442` |
-| Pre-flight checklist UI              | ✓      | `FlightPlanner.jsx:478-491, 625-638` |
+| Mission create (map left-click)      | ✓      | `frontend/src/components/MapEditor.jsx` left-click handler → `useMissionStore.addWaypoint(lat,lng,alt=50)` |
+| Map right-click context menu (TAKEOFF/LAND/RTL/LOITER/SPLINE/ROI/DO_*) | ✓ | `MapEditor.jsx:460-528` |
+| Right-click "Insert RTL" appends cmd 20 at end | ✓ | `MapEditor.jsx:513` calling `addCommand(20)` → `insertWaypointAt(waypoints.length, {command:20, lat, lng, alt:50})` |
+| WaypointTable inline edit            | ✓      | `frontend/src/components/WaypointTable.jsx` (391 lines) |
+| Drag-reorder / move up/down rows     | ✓      | `useMissionStore.moveWaypoint(seq, ±1)` with `_reindex` |
+| Undo / Bulk Alt                      | ✓      | `useMissionStore._undoStack` cap 20 |
+| TAKEOFF-first hard block             | ✓      | `FlightPlanner.jsx:blockingErrors` — refuses Write when first item ≠ cmd 22 |
+| Validation split warnings vs infos   | ✓ (post-fix) | `FlightPlanner.jsx:validateMission` returns `{warnings, infos}` |
+| MISSION_TYPE_MISSION upload          | ✓      | `python_service/mission_manager.py:upload_mission` |
+| HOME injection at seq=0              | ✓      | `mission_manager.py:_inject_home` — uses vehicle.home if `home.valid`, else (0,0,0) |
+| Re-indexing after insert/remove/move | ✓      | `useMissionStore._reindex` |
+| Save/Load `.waypoints` (QGC WPL 110) | ✓      | `FlightPlanner.jsx:parseWaypointsFile, buildWaypointsFile` |
+| MISSION_REQUEST_INT INVALID_SEQUENCE drain | ✓ | `mission_manager.py:275-304` (drains spurious ACKs inline) |
+| MISSION_ITEM_INT lat/lng × 1e7 scale | ✓      | `mission_manager.py:271` |
+| Final MISSION_ACK timeout=1s         | ✓      | `mission_manager.py:317` |
+| AUTO start (`mission_start` shortcut → cmd 300, p1=0, p2=0) | ✓ | `node_api/server.js:293`; `command_manager.py:execute_command` |
+| Mode set GUIDED / AUTO               | ✓      | `mavlink_link.set_mode_send`; UI `FlightPlanner.jsx:setMode` |
+| ARM with auto-retry on "mode not armable" | ✓ | `frontend/src/components/tabs/ActionsTab.jsx:75-100` (switch to STABILIZE, retry) |
+| Pre-flight checklist (Connected, GPS, Home, TAKEOFF, WPs, Armed, AUTO, fence interaction) | ✓ | `FlightPlanner.jsx:preflightChecks` |
+| canStartMission gate                 | ✓      | `FlightPlanner.jsx:617` (`!loading && waypoints>0 && armed && AUTO && hasTakeoffCmd`) |
+| MISSION_CURRENT (seq) tracking       | ✓      | `message_handlers.py:119-120`; surfaced in MissionExecutionPanel |
+| MISSION COMPLETE detection on AUTO→RTL/LAND | ✓ | `MissionExecutionPanel.jsx:77-101` (badge "MISSION COMPLETE" vs "failsafe") |
+| Re-arm after mission complete (one-click) | ✗ | recommended F9 — see `FLIGHT_PLANNER_CENTRALIZED.md §11.2` |
+| Write button gated on `home.valid`   | ✗ | recommended F6 |
+| Confirm-before-write modal           | ✗ | recommended F10 |
+| Right-click DO_DIGICAM_CONTROL (203) | ✗ | recommended F11 |
+| Right-click CONDITION_DELAY (112), CONDITION_YAW (115) | ✗ | recommended F11 |
 
 ---
 
@@ -168,7 +205,17 @@ Legend: ✓ exists / ◑ partial / ✗ missing / D duplicated / F fragmented
 |--------------------------------------------------------------|------|
 | Centralized doc                                              | `FLIGHT_PLANNER_CENTRALIZED.md` |
 | Audit table                                                  | `FLIGHT_PLANNER_AUDIT_TABLE.md` (this file) |
-| Fence diagnostics implementation                             | next iteration — code changes in `python_service/` + `frontend/` |
-| Survey Grid fixes                                            | next iteration |
-| AutoPan implementation                                       | next iteration |
+| Mission Planner parity comparison                            | `FLIGHT_PLANNER_CENTRALIZED.md` §10 |
+| Production fix list (with commit message)                    | `FLIGHT_PLANNER_CENTRALIZED.md` §11 |
+| Regression audit (2026-05-25)                                | Section 0 above + `FLIGHT_PLANNER_CENTRALIZED.md` §0, §2.4 |
+| Fence diagnostics implementation                             | shipped — `FlightPlanner.jsx:fenceDiagnostics`, `vehicle_state.FenceStatus`, `message_handlers.FENCE_STATUS` |
+| Survey Grid fixes                                            | not yet shipped — see `FLIGHT_PLANNER_CENTRALIZED.md` §4 |
+| AutoPan implementation                                       | shipped — `MapEditor.jsx:autoPan` toggle |
 | User instructions                                            | Section 9 of `FLIGHT_PLANNER_CENTRALIZED.md` |
+
+---
+
+## H. CHANGE LOG
+
+- **2026-05-25** — Regression audit. Added Section 0 (regression table) mapping the user-reported "mission broken" symptom to merge-conflict duplicate-import artifacts in commit `429705f`. Rewrote Section A (Mission) from "reference only" to a full audit table now that mission is in scope. Updated Deliverables Summary.
+- **2026-05-24** — Initial audit. Mission marked reference-only; focused on Fence + Survey + Map gaps.

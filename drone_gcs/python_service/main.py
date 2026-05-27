@@ -323,7 +323,6 @@ async def fence_status():
         "alt_min": float(params.get("FENCE_ALT_MIN", 0.0)),
         "margin": float(params.get("FENCE_MARGIN", 2.0)),
         "fence_status_msg": fs,
-        "fence_status_msg": fs,
     }
 
 class FenceConfigRequest(BaseModel):
@@ -823,12 +822,17 @@ async def run_calibration(req: CalibrationRequest):
     if not kind:
         raise HTTPException(status_code=400, detail="Calibration kind is required")
 
-    # MAV_CMD_PREFLIGHT_CALIBRATION = 241: p5=accel, p7=level, p1=3 ESC
+    # MAV_CMD_PREFLIGHT_CALIBRATION = 241:
+    #   p1=1 gyro cal · p2=1 mag · p3=1 ground pressure · p4=1 RC cal / 2 RC trim ·
+    #   p5=1 accel 6-pos · p5=2 board level · p5=4 simple accel ·
+    #   p6=1 compass-motor / 2 airspeed · p7=1 ESC cal
     # MAV_CMD_DO_START_MAG_CAL = 42424: p1=0(all), p2=1(retry), p3=1(autosave)
+    # Parity reference: Mission Planner ConfigAccelerometerCalibration.BUT_level_Click sends p5=2;
+    # QGroundControl Vehicle.cc CalibrationLevel sets param5=2.
     presets = {
         "accelerometer": {"command": 241, "p5": 1.0},
         "compass":       {"command": 42424, "p1": 0.0, "p2": 1.0, "p3": 1.0},
-        "level":         {"command": 241, "p7": 1.0},
+        "level":         {"command": 241, "p5": 2.0},
         "esc":           {"command": 241, "p1": 3.0},
         "gyro":          {"command": 241, "p1": 1.0},
     }

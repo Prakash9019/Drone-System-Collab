@@ -69,7 +69,34 @@ const ActionsTab = ({ vehicleState }) => {
         const res = await axios.post(`${API}/command/${action.name}`, body);
         const d = res.data;
         if (d.accepted === false) {
-          showStatus(`✗ ${action.label}: ${d.mav_result_text || 'REJECTED'}`, false);
+          // ArduPilot Copter rejects ARM when the current flight mode is a
+          // motor-stopped mode (e.g. RTL after mission complete). The error text
+          // is "RTL mode not armable" / "LAND mode not armable" / etc. We detect
+          // those and offer to switch to STABILIZE then retry ARM in one click.
+          const txt = String(d.mav_result_text || '').toLowerCase();
+          const isModeNotArmable =
+            action.name === 'arm' &&
+            (txt.includes('not armable') || txt.includes('mode not arm'));
+          if (isModeNotArmable) {
+            showStatus(`✗ ARM rejected: ${d.mav_result_text}. Switching to STABILIZE and retrying…`, false);
+            try {
+              await axios.post(`${API}/mode`, { mode: 'STABILIZE' });
+              // ArduPilot needs a moment to process the mode change before it'll
+              // accept ARM in the new mode.
+              await new Promise(r => setTimeout(r, 400));
+              const retry = await axios.post(`${API}/command/arm`, {});
+              const rd = retry.data;
+              if (rd.accepted === false) {
+                showStatus(`✗ ARM still rejected after STABILIZE: ${rd.mav_result_text || 'REJECTED'}`, false);
+              } else {
+                showStatus(`✓ ARM: ${rd.mav_result_text || 'OK'} (mode auto-switched to STABILIZE)`, true);
+              }
+            } catch (retryErr) {
+              showStatus(`✗ Auto-retry failed: ${retryErr?.message || 'unknown'}`, false);
+            }
+          } else {
+            showStatus(`✗ ${action.label}: ${d.mav_result_text || 'REJECTED'}`, false);
+          }
         } else {
           showStatus(`✓ ${action.label}: ${d.mav_result_text || 'OK'}`, true);
         }

@@ -171,7 +171,7 @@ const GaugesTab = ({ vehicleState }) => {
         warnAt={30} dangerAt={42}
       />
       <ArcGauge
-        label="Altitude"
+        label="Alt (Rel Home)"
         value={v?.position?.alt_rel ?? 0}
         unit="m"
         min={0} max={500}

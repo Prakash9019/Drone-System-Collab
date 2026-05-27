@@ -366,6 +366,21 @@ const MapEditor = () => {
 
   const addCommand = (command) => {
     if (contextMenu.lat === null || contextMenu.lng === null) return;
+    // TAKEOFF must be the FIRST mission item (ArduPilot Copter AUTO refuses with
+    // "Auto: Missing Takeoff Cmd" otherwise), so we insert at index 0. The lat/lng
+    // comes from the clicked map point — HOME is a separate concept that stays
+    // wherever the autopilot put it and is NOT overwritten by this action.
+    if (command === 22 && missionType === 'MISSION') {
+      insertWaypointAt(0, {
+        command: 22,
+        frame: 3,
+        lat: contextMenu.lat,
+        lng: contextMenu.lng,
+        alt: 10,
+      });
+      closeContextMenu();
+      return;
+    }
     insertWaypointAt(waypoints.length, {
       command,
       lat: contextMenu.lat,

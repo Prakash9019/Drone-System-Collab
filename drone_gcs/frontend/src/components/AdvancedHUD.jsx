@@ -287,7 +287,9 @@ function AltitudeTape({ altitude, climbRate }) {
         </div>
       </div>
       <div className="hud2-tape-footer">
-        <div>ALT {alt.toFixed(1)}m</div>
+        <div title="Relative-to-home altitude — same as Mission Planner HUD 'Alt' (GLOBAL_POSITION_INT.relative_alt)">
+          ALT (REL) {alt.toFixed(1)}m
+        </div>
         <div style={{ color: vsi >= 0 ? '#4ade80' : '#f87171' }}>
           VSI {vsi >= 0 ? '+' : ''}{vsi.toFixed(1)}
         </div>
@@ -315,9 +317,18 @@ function StatusTextToast({ messages }) {
 
   useEffect(() => {
     if (!Array.isArray(messages) || messages.length === 0) return undefined;
+    // ArduPilot sends fence breaches and several failsafe notices at NOTICE (severity 5),
+    // which is BELOW the generic toast threshold (4). That is why "Polygon fence breached"
+    // never toasted during flight and the operator could not see WHY the vehicle returned.
+    // Always surface fence / breach / failsafe lines regardless of their severity.
+    const isImportant = (m) => {
+      if ((m?.severity ?? 7) <= STATUSTEXT_TOAST_SEVERITY) return true;
+      const t = String(m?.text || '').toLowerCase();
+      return t.includes('fence') || t.includes('breach') || t.includes('failsafe');
+    };
     let latest = null;
     for (const m of messages) {
-      if ((m?.severity ?? 7) > STATUSTEXT_TOAST_SEVERITY) continue;
+      if (!isImportant(m)) continue;
       if (!latest || (m.timestamp ?? 0) > (latest.timestamp ?? 0)) latest = m;
     }
     if (!latest) return undefined;
@@ -333,9 +344,12 @@ function StatusTextToast({ messages }) {
 
   if (!shown) return null;
   const sev = shown.severity ?? 6;
+  const txt = String(shown.text || '').toLowerCase();
+  const isFenceOrFailsafe = txt.includes('fence') || txt.includes('breach') || txt.includes('failsafe');
   // MAV_SEVERITY: 0 EMERGENCY · 1 ALERT · 2 CRITICAL · 3 ERROR · 4 WARNING · 5 NOTICE · 6 INFO · 7 DEBUG
-  const color = sev <= 2 ? '#ef4444' : sev === 3 ? '#f97316' : '#f59e0b';
-  const label = ['EMERG', 'ALERT', 'CRIT', 'ERROR', 'WARN', 'NOTICE', 'INFO', 'DEBUG'][sev] || 'MSG';
+  // Fence/failsafe lines are operationally critical even when ArduPilot tags them NOTICE — paint red.
+  const color = isFenceOrFailsafe ? '#ef4444' : sev <= 2 ? '#ef4444' : sev === 3 ? '#f97316' : '#f59e0b';
+  const label = isFenceOrFailsafe ? 'FENCE' : (['EMERG', 'ALERT', 'CRIT', 'ERROR', 'WARN', 'NOTICE', 'INFO', 'DEBUG'][sev] || 'MSG');
   return (
     <div className="hud2-statustext-toast" style={{
       position: 'absolute',

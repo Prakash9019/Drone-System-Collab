@@ -19,13 +19,17 @@ const buildStatusRows = (v) => {
 
     // --- GPS ---
     { group: 'GPS', key: 'fix_type', value: v.status?.gps_fix ?? 0 },
-    { group: 'GPS', key: 'satellites', value: v.status?.satellites ?? 0 },
+    { group: 'GPS', key: 'sat_count', value: v.status?.satellites ?? 0 },
     { group: 'GPS', key: 'hdop', value: v.status?.gps_hdop?.toFixed?.(2) ?? '--' },
     { group: 'GPS', key: 'vdop', value: v.status?.gps_vdop?.toFixed?.(2) ?? '--' },
     { group: 'GPS', key: 'lat', value: v.position?.lat?.toFixed(7) ?? '--' },
     { group: 'GPS', key: 'lng', value: v.position?.lng?.toFixed(7) ?? '--' },
-    { group: 'GPS', key: 'alt_amsl_m', value: v.position?.alt_amsl?.toFixed(2) ?? '--' },
-    { group: 'GPS', key: 'alt_rel_m', value: v.position?.alt_rel?.toFixed(2) ?? '--' },
+    // Altitude rows — labels mirror Mission Planner CurrentState (alt = Rel Home; altasl = MSL).
+    { group: 'GPS', key: 'alt_rel_home_m', value: v.position?.alt_rel?.toFixed(2) ?? '--' },
+    { group: 'GPS', key: 'alt_asl_m', value: v.position?.alt_amsl?.toFixed(2) ?? '--' },
+    { group: 'GPS', key: 'alt_agl_m', value: v.position?.rangefinder_valid
+        ? v.position.rangefinder_dist.toFixed(2)
+        : v.position?.alt_terrain_valid ? v.position.alt_terrain.toFixed(2) : '--' },
 
     // --- Attitude ---
     { group: 'Attitude', key: 'roll_rad', value: v.attitude?.roll?.toFixed(4) ?? '--' },

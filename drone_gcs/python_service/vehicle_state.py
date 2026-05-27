@@ -16,8 +16,24 @@ class ConnectionState(Enum):
 class Position:
     lat: float = 0.0
     lng: float = 0.0
+    # Altitude semantics (matches Mission Planner CurrentState):
+    #   alt_amsl   — absolute MSL altitude (Mission Planner "Alt ASL")
+    #                source: GLOBAL_POSITION_INT.alt  (mm → m)
+    #   alt_rel    — altitude above HOME (Mission Planner "Alt" — the primary HUD altitude)
+    #                source: GLOBAL_POSITION_INT.relative_alt  (mm → m)
+    #   alt_terrain — altitude above terrain when terrain data is available, in m.
+    #                 Mission Planner "ter_alt". Source: TERRAIN_REPORT.current_height.
+    #                 0.0 when no terrain data has arrived; consumers should also check
+    #                 alt_terrain_valid.
+    #   rangefinder_dist — measured distance to ground from a downward rangefinder, in m.
+    #                      This is the truest AGL value when available.
+    #                      Source: RANGEFINDER.distance or DISTANCE_SENSOR (downward facing).
     alt_amsl: float = 0.0
     alt_rel: float = 0.0
+    alt_terrain: float = 0.0
+    alt_terrain_valid: bool = False
+    rangefinder_dist: float = 0.0
+    rangefinder_valid: bool = False
 
 @dataclass
 class Attitude:
@@ -138,23 +154,6 @@ class EKFOrigin:
     valid: bool = False
 
 @dataclass
-class FenceStatus:
-    """Mirrors the MAVLink FENCE_STATUS message + last fence STATUSTEXT.
-    breach_status: 0 = no breach, 1 = breach active
-    breach_type:   0=NONE 1=MINALT 2=MAXALT 3=BOUNDARY (polygon or circle)
-    breach_mitigation: 0=none 1=RTL 2=Land 3=Brake 4=SmartRTL
-    last_breach_text: most recent fence-related STATUSTEXT (filled by STATUSTEXT handler).
-    valid: True after we've seen at least one FENCE_STATUS msg."""
-    breach_status: int = 0
-    breach_type: int = 0
-    breach_count: int = 0
-    breach_time: int = 0
-    breach_mitigation: int = 0
-    last_breach_text: str = ""
-    last_breach_text_ts: float = 0.0
-    valid: bool = False
-
-@dataclass
 class VehicleState:
     sysid: int
     compid: int
@@ -189,6 +188,10 @@ class VehicleState:
                 "lng": self.position.lng,
                 "alt_amsl": self.position.alt_amsl,
                 "alt_rel": self.position.alt_rel,
+                "alt_terrain": self.position.alt_terrain,
+                "alt_terrain_valid": self.position.alt_terrain_valid,
+                "rangefinder_dist": self.position.rangefinder_dist,
+                "rangefinder_valid": self.position.rangefinder_valid,
             },
             "attitude": {
                 "roll": self.attitude.roll,

@@ -103,6 +103,41 @@ def handle_message(msg: any, state: VehicleState):
                 state.velocity.heading = float(hdg) / 100.0
             except (TypeError, ValueError):
                 pass
+    elif msg_type == 'TERRAIN_REPORT':
+        # Height above terrain in metres. Mission Planner CurrentState.cs sets `ter_alt`
+        # from this field; it is the canonical "AGL when terrain data is loaded".
+        # current_height is mm in some firmwares, m in others — ArduPilot uses metres.
+        ch = getattr(msg, 'current_height', None)
+        if ch is not None:
+            try:
+                state.position.alt_terrain = float(ch)
+                state.position.alt_terrain_valid = True
+            except (TypeError, ValueError):
+                pass
+
+    elif msg_type == 'RANGEFINDER':
+        # Downward rangefinder distance in metres — the most accurate AGL value when present.
+        d = getattr(msg, 'distance', None)
+        if d is not None:
+            try:
+                state.position.rangefinder_dist = float(d)
+                state.position.rangefinder_valid = float(d) > 0
+            except (TypeError, ValueError):
+                pass
+
+    elif msg_type == 'DISTANCE_SENSOR':
+        # Only treat as AGL if the sensor faces straight down. MAV_SENSOR_ROTATION_PITCH_270 = 25
+        # (downward); also accept orientation == 0 for legacy emitters that report no rotation.
+        orientation = int(getattr(msg, 'orientation', -1))
+        if orientation in (0, 25):
+            curr_cm = getattr(msg, 'current_distance', None)
+            if curr_cm is not None:
+                try:
+                    state.position.rangefinder_dist = float(curr_cm) / 100.0
+                    state.position.rangefinder_valid = float(curr_cm) > 0
+                except (TypeError, ValueError):
+                    pass
+
     elif msg_type == 'HOME_POSITION':
         state.home.lat = msg.latitude / 1e7
         state.home.lng = msg.longitude / 1e7

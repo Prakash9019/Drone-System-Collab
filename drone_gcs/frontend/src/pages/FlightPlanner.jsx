@@ -6,9 +6,7 @@ import useTelemetryStore, { selectPrimaryVehicle } from '../store/useTelemetrySt
 import MapEditor from '../components/MapEditor';
 import WaypointTable from '../components/WaypointTable';
 import SurveyGridPanel from '../components/SurveyGridPanel';
-import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
-import { pointInPolygon, fencePolygonsFromWaypoints, haversineM } from '../utils/geometry';
-import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { UploadCloud, DownloadCloud, Trash2, Grid3x3, Save, FolderOpen, ZoomIn, AlertTriangle, Info, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { pointInPolygon, fencePolygonsFromWaypoints, haversineM } from '../utils/geometry';
 
 const API_URL = 'http://localhost:8080';
@@ -121,24 +119,29 @@ function validateFence(waypoints) {
 }
 
 function validateMission(waypoints, missionType) {
-  if (missionType === 'FENCE') return validateFence(waypoints);
-  if (missionType !== 'MISSION') return [];
+  if (missionType === 'FENCE') return { warnings: validateFence(waypoints), infos: [] };
+  if (missionType !== 'MISSION') return { warnings: [], infos: [] };
   const warnings = [];
+  const infos = [];
   const cmds = waypoints.map(w => Number(w.command));
   if (!cmds.includes(22)) warnings.push('No TAKEOFF command (cmd 22) — drone may not arm for AUTO mode');
-  // ArduPilot Copter: TAKEOFF must be the first non-HOME item. The mission_manager backend
-  // injects HOME at seq=0 on upload, so the planner's index 0 must be TAKEOFF.
   if (cmds.length > 0 && cmds[0] !== 22 && cmds.includes(22)) {
     warnings.push('TAKEOFF is not the first item — Copter AUTO requires TAKEOFF immediately after HOME');
   }
-  if (!cmds.some(c => c === 20 || c === 21)) warnings.push('No RTL (20) or LAND (21) — mission may not end cleanly');
+  if (!cmds.some(c => c === 20 || c === 21)) {
+    warnings.push('No RTL (20) or LAND (21) at the end — vehicle will hover at the last waypoint until you switch mode manually.');
+  } else {
+    const lastCmd = cmds[cmds.length - 1];
+    if (lastCmd === 20) infos.push('Last item is RTL (20) — vehicle will switch AUTO → RTL at that waypoint and return to home. This is normal end-of-mission behaviour.');
+    else if (lastCmd === 21) infos.push('Last item is LAND (21) — vehicle will switch AUTO → LAND at that waypoint, descend, and disarm. This is normal end-of-mission behaviour.');
+  }
   if (waypoints.length > 500) warnings.push(`Large mission: ${waypoints.length} waypoints (limit may be 512)`);
   if (waypoints.some(w => !w.lat && !w.lng)) warnings.push('Some waypoints have zero coordinates — check table');
-  return warnings;
+  return { warnings, infos };
 }
 
 // Hard blockers that must prevent upload/AUTO entirely. Soft warnings still pass through validateMission().
-function blockingErrors(waypoints, missionType) {
+function blockingErrors(waypoints, missionType, vehicle) {
   if (missionType !== 'MISSION') return [];
   const errors = [];
   const cmds = waypoints.map(w => Number(w.command));
@@ -148,6 +151,19 @@ function blockingErrors(waypoints, missionType) {
   }
   if (cmds.length && cmds[0] !== 22) {
     errors.push('First mission item must be TAKEOFF (cmd 22).');
+  }
+  // Without a valid HOME the Python backend prepends (0,0,0) as seq 0 — ArduPilot
+  // accepts it but anchors the mission to null-island. Refuse upload until the
+  // autopilot has streamed HOME_POSITION. Mission Planner refuses for the same
+  // reason.
+  const home = vehicle?.home;
+  const homeValid =
+    !!home?.valid &&
+    Number.isFinite(Number(home.lat)) &&
+    Number.isFinite(Number(home.lng)) &&
+    !(home.lat === 0 && home.lng === 0);
+  if (cmds.length && !homeValid) {
+    errors.push('HOME_POSITION not yet received from autopilot — wait a few seconds for it to arrive before WRITE, or set Home on the Simulation page.');
   }
   return errors;
 }
@@ -199,7 +215,7 @@ const FlightPlanner = () => {
   const currentMode = String(vehicle?.status?.mode || 'UNKNOWN').toUpperCase();
   const missionSeq = Number(vehicle?.mission?.current_seq ?? -1);
 
-  const validationWarnings = useMemo(() => validateMission(waypoints, missionType), [waypoints, missionType]);
+  const { warnings: validationWarnings, infos: validationInfos } = useMemo(() => validateMission(waypoints, missionType), [waypoints, missionType]);
 
   const fenceCounts = useMemo(() => ({
     inc: waypoints.filter(w => Number(w.command) === FENCE_CMD_INCLUSION).length,
@@ -374,7 +390,7 @@ const FlightPlanner = () => {
     // Block upload if the mission is structurally broken for Copter AUTO. ArduPilot will
     // accept the upload but later refuse to enter AUTO with "Auto: Missing Takeoff Cmd",
     // which is the exact failure mode we are trying to prevent.
-    const blockers = blockingErrors(waypoints, missionType);
+    const blockers = blockingErrors(waypoints, missionType, vehicle);
     if (blockers.length) {
       setStatusMsg(`Mission rejected — ${blockers[0]}`);
       setShowValidation(true);
@@ -458,7 +474,6 @@ const FlightPlanner = () => {
             alt_min: Number(res.data?.alt_min ?? 0),
             margin: Number(res.data?.margin ?? 2),
             fence_type: Number(res.data?.fence_type ?? 7),
-            fence_type: Number(res.data?.fence_type ?? 7),
           });
         }
       } catch { setFenceStatus(null); }
@@ -488,7 +503,6 @@ const FlightPlanner = () => {
         alt_max: Number(res.data?.alt_max ?? 120),
         alt_min: Number(res.data?.alt_min ?? 0),
         margin: Number(res.data?.margin ?? 2),
-        fence_type: Number(res.data?.fence_type ?? 7),
         fence_type: Number(res.data?.fence_type ?? 7),
       });
     } catch (err) {
@@ -615,6 +629,26 @@ const FlightPlanner = () => {
 
   const canStartMission = !loading && waypoints.length > 0 && !!vehicle?.status?.armed && inAutoMode && hasTakeoffCmd;
 
+  // ─── Mission run-state (operator clarity) ──────────────────────────────────
+  // ArduCopter advances MISSION_CURRENT to seq 1 (the TAKEOFF) the instant AUTO
+  // is entered — identical to Mission Planner (CurrentState.cs maps wpno = seq
+  // with no masking). The vehicle does NOT actually fly the mission until it is
+  // "auto-armed" (throttle raised on a real TX, or MAV_CMD_MISSION_START sent by
+  // the Start Mission button). Showing only the bare "WP 1/N" makes the seq jump
+  // read as "the mission already started", which it has not. Derive an explicit
+  // run-state from telemetry so the counter cannot be misread. We intentionally
+  // still display the real seq (Mission Planner parity) and only annotate it.
+  const armed = !!vehicle?.status?.armed;
+  const altRel = Number(vehicle?.position?.alt_rel);
+  const airborne = Number.isFinite(altRel) && altRel > 0.8;
+  const missionRunState = !armed
+    ? 'DISARMED'
+    : inAutoMode && !airborne
+      ? 'HOLDING'   // armed + AUTO, still on the ground: waiting for Start Mission
+      : inAutoMode && airborne
+        ? 'RUNNING'
+        : 'ARMED';  // armed but not yet in AUTO
+
   return (
     <div className="flight-planner">
       {surveyOpen && missionType === 'MISSION' && (
@@ -660,9 +694,18 @@ const FlightPlanner = () => {
         <button className="btn-toolbar" onClick={handleZoomToFit} disabled={!waypoints.length} title="Zoom map to fit all waypoints">
           <ZoomIn size={16} /> Zoom Fit
         </button>
-        {validationWarnings.length > 0 && (missionType === 'MISSION' || missionType === 'FENCE') && (
-          <button className="btn-toolbar" style={{ color: '#f59e0b', borderColor: '#f59e0b' }} onClick={() => setShowValidation(v => !v)} title={`${missionType} validation warnings`}>
-            <AlertTriangle size={16} /> {validationWarnings.length} Warning{validationWarnings.length > 1 ? 's' : ''}
+        {(validationWarnings.length > 0 || validationInfos.length > 0) && (missionType === 'MISSION' || missionType === 'FENCE') && (
+          <button
+            className="btn-toolbar"
+            style={validationWarnings.length > 0
+              ? { color: '#f59e0b', borderColor: '#f59e0b' }
+              : { color: '#38bdf8', borderColor: '#38bdf8' }}
+            onClick={() => setShowValidation(v => !v)}
+            title={`${missionType} validation notes`}
+          >
+            {validationWarnings.length > 0
+              ? <><AlertTriangle size={16} /> {validationWarnings.length} Warning{validationWarnings.length > 1 ? 's' : ''}</>
+              : <><Info size={16} /> Mission Info</>}
           </button>
         )}
         {statusMsg && <span className="status-msg">{statusMsg}</span>}
@@ -700,12 +743,17 @@ const FlightPlanner = () => {
         )}
       </div>
 
-      {/* Validation warnings panel */}
-      {showValidation && validationWarnings.length > 0 && (
-        <div className="mission-toolbar" style={{ background: 'rgba(245,158,11,0.1)', borderColor: '#f59e0b', height: 'auto', flexDirection: 'column', alignItems: 'flex-start', gap: 4, padding: '8px 12px' }}>
+      {/* Validation warnings / info panel */}
+      {showValidation && (validationWarnings.length > 0 || validationInfos.length > 0) && (
+        <div className="mission-toolbar" style={{ background: 'rgba(30,30,40,0.8)', borderColor: '#475569', height: 'auto', flexDirection: 'column', alignItems: 'flex-start', gap: 4, padding: '8px 12px' }}>
           {validationWarnings.map((w, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#fbbf24' }}>
+            <div key={`w-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#fbbf24' }}>
               <AlertTriangle size={13} /> {w}
+            </div>
+          ))}
+          {validationInfos.map((msg, i) => (
+            <div key={`i-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#38bdf8' }}>
+              <Info size={13} /> {msg}
             </div>
           ))}
         </div>
@@ -724,6 +772,15 @@ const FlightPlanner = () => {
           <span className="status-msg" style={{ fontWeight: 600 }}>
             WP: {missionSeq >= 0 ? missionSeq : '—'} / {Math.max((missionPlannedTotal || waypoints.length) - 1, 0)}
           </span>
+          {missionRunState === 'HOLDING' && (
+            <span className="status-msg" style={{ color: '#fbbf24', fontWeight: 600 }}
+              title="ArduCopter points its mission cursor at the TAKEOFF the moment you enter AUTO (same as Mission Planner). The vehicle is armed and waiting — it has NOT started the mission. Click Start Mission to begin.">
+              ⏸ HOLDING · mission not started — seq {missionSeq >= 0 ? missionSeq : 0} is the autopilot's TAKEOFF cursor. Click Start Mission.
+            </span>
+          )}
+          {missionRunState === 'RUNNING' && (
+            <span className="status-msg" style={{ color: '#4ade80', fontWeight: 600 }}>▶ RUNNING</span>
+          )}
           <span className="status-msg">Mode: {currentMode}</span>
           {!hasTakeoffCmd && waypoints.length > 0 && (
             <button

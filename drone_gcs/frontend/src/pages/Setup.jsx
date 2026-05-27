@@ -27,13 +27,13 @@ const QUICK_CAL_ITEMS = [
     id: 'level',
     label: 'Level Horizon',
     icon: '—',
-    hint: 'MAV_CMD_PREFLIGHT_CALIBRATION p7=1',
+    hint: 'MAV_CMD_PREFLIGHT_CALIBRATION p5=2',
     danger: false,
     doc: {
       what: 'Level calibration corrects the IMU trim — it tells the FC what "flat" looks like for attitude estimation.',
       when: 'Run if the artificial horizon shows a tilt when the vehicle is sitting perfectly level on a flat surface.',
       how: 'Place vehicle on a flat, level surface. Click Run. The FC samples the accelerometer and stores trim offsets to AHRS_TRIM_X/Y/Z.',
-      mavlink: 'MAV_CMD_PREFLIGHT_CALIBRATION (241), param7=1',
+      mavlink: 'MAV_CMD_PREFLIGHT_CALIBRATION (241), param5=2 (board level cal)',
     },
   },
   {

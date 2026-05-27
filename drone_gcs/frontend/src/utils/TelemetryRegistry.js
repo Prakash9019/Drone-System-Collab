@@ -27,15 +27,33 @@ function fmt(val, decimals = 2, fallback = '0.00') {
 
 export const TelemetryRegistry = {
   // ─── Position ───────────────────────────────────────────────────────────
+  //
+  // Altitude semantics (Mission Planner parity — see CurrentState.cs):
+  //   altitude (Alt Rel Home) → GLOBAL_POSITION_INT.relative_alt — MP "Alt", the primary HUD value.
+  //   altAmsl  (Alt ASL)      → GLOBAL_POSITION_INT.alt          — MP "Alt ASL", above mean sea level.
+  //   altAGL   (Alt AGL)      → RANGEFINDER.distance preferred, falls back to TERRAIN_REPORT.
+  //                             "—" when neither sensor is reporting.
   altitude: {
-    label: 'Altitude (m)',
+    label: 'Alt (Rel Home) (m)',
     getValue: (s) => fmt(s?.position?.alt_rel, 2, '0.00'),
     color: 'var(--accent-red)',
     group: 'Position',
   },
   altAmsl: {
-    label: 'Alt AMSL (m)',
+    label: 'Alt ASL (m)',
     getValue: (s) => fmt(s?.position?.alt_amsl, 2, '0.00'),
+    color: 'var(--accent-red)',
+    group: 'Position',
+  },
+  altAGL: {
+    label: 'Alt AGL (m)',
+    getValue: (s) => {
+      // Prefer rangefinder when available (truest AGL); fall back to terrain database;
+      // otherwise show "—" rather than reusing alt_rel, which would be misleading.
+      if (s?.position?.rangefinder_valid) return fmt(s.position.rangefinder_dist, 2, '—');
+      if (s?.position?.alt_terrain_valid) return fmt(s.position.alt_terrain, 2, '—');
+      return '—';
+    },
     color: 'var(--accent-red)',
     group: 'Position',
   },
@@ -183,6 +201,22 @@ export const TelemetryRegistry = {
   },
 
   // ─── GPS ────────────────────────────────────────────────────────────────
+  // gpsStatus combines fix-type + satellite count + HDOP into a single Mission Planner-style
+  // line so the operator can read GPS health at a glance without dedicating three cells.
+  gpsStatus: {
+    label: 'GPS Status',
+    getValue: (s) => {
+      const f = s?.status?.gps_fix ?? 0;
+      const sats = s?.status?.satellites ?? 0;
+      const hdop = s?.status?.gps_hdop;
+      const fixNames = { 0: 'No GPS', 1: 'No Fix', 2: '2D', 3: '3D', 4: 'DGPS', 5: 'RTK Flt', 6: 'RTK Fix' };
+      const fixTxt = fixNames[f] || `Fix${f}`;
+      const hdopTxt = hdop && hdop > 0 ? ` · HDOP ${hdop.toFixed(2)}` : '';
+      return `${fixTxt} · ${sats} sats${hdopTxt}`;
+    },
+    color: 'white',
+    group: 'GPS',
+  },
   gpsFix: {
     label: 'GPS Fix Type',
     getValue: (s) => {
@@ -194,7 +228,7 @@ export const TelemetryRegistry = {
     group: 'GPS',
   },
   satellites: {
-    label: 'Satellites',
+    label: 'Sat Count',
     getValue: (s) => String(s?.status?.satellites ?? 0),
     color: 'white',
     group: 'GPS',

@@ -175,9 +175,34 @@ const FlightData = () => {
     try {
       const data = await sendShortcutCommand(name, body);
       if (data.accepted === false) {
-        setCmdBanner(
-          `${String(name).toUpperCase()}: ${data.mav_result_text || 'failed'}${data.reason ? ` (${data.reason})` : ''}`
-        );
+        // ArduPilot Copter rejects ARM when the current flight mode is a
+        // motor-stopped mode (e.g. RTL after a completed mission). The reject
+        // text contains "not armable" / "mode not arm". Auto-switch to
+        // STABILIZE and retry ARM once so the user doesn't have to chase
+        // through two menus to restart a mission.
+        const txt = String(data.mav_result_text || '').toLowerCase();
+        const isModeNotArmable =
+          String(name).toLowerCase() === 'arm' &&
+          (txt.includes('not armable') || txt.includes('mode not arm'));
+        if (isModeNotArmable) {
+          setCmdBanner(`ARM rejected: ${data.mav_result_text}. Switching to STABILIZE and retrying…`);
+          try {
+            await axios.post(`${API_URL}/api/mode`, { mode: 'STABILIZE' });
+            await new Promise(r => setTimeout(r, 400));
+            const retry = await sendShortcutCommand('arm');
+            if (retry?.accepted === false) {
+              setCmdBanner(`ARM still rejected after STABILIZE: ${retry.mav_result_text || 'REJECTED'}`);
+            } else {
+              setCmdBanner(`ARM: ${retry?.mav_result_text || 'OK'} (mode auto-switched to STABILIZE)`);
+            }
+          } catch (retryErr) {
+            setCmdBanner(`Auto-retry failed: ${retryErr?.message || 'unknown'}`);
+          }
+        } else {
+          setCmdBanner(
+            `${String(name).toUpperCase()}: ${data.mav_result_text || 'failed'}${data.reason ? ` (${data.reason})` : ''}`
+          );
+        }
       } else {
         setCmdBanner(`${String(name).toUpperCase()}: ${data.mav_result_text || 'OK'}`);
       }
@@ -458,6 +483,10 @@ const FlightData = () => {
               vehicleGroundSpeed={vehicle?.velocity?.groundspeed}
               vehicleWpDist={vehicle?.navigation?.wp_dist}
               missionSyncStatus={missionSyncStatus}
+              vehicleMode={vehicle?.status?.mode}
+              vehicleArmed={!!vehicle?.status?.armed}
+              statusMessages={vehicle?.status_messages}
+              fenceBreachText={vehicle?.fence_status?.last_breach_text}
             />
           </div>
         </div>

@@ -1,12 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import { TelemetryRegistry } from '../../utils/TelemetryRegistry';
 
-const LS_KEY = 'drone_gcs_quick_tab_keys_v2';
+// Bumped to v3 when altitudes were relabelled (Alt Rel Home / Alt ASL / Alt AGL) and the
+// Mission Planner-style combined GPS Status widget was added. Bumping the key forces existing
+// users to pick up the new default layout instead of being stuck on the v2 cache.
+const LS_KEY = 'drone_gcs_quick_tab_keys_v3';
 const DEFAULT_KEYS = [
-  'altitude', 'groundspeed', 'airspeed', 'heading',
-  'missionSeq', 'distToWp', 'verticalSpeed', 'distToMav',
-  'battery', 'gpsFix', 'satellites', 'gpsHdop',
-  'throttle', 'roll', 'pitch', 'timeInAir',
+  'altitude', 'altAmsl', 'altAGL', 'groundspeed',
+  'verticalSpeed', 'airspeed', 'heading', 'throttle',
+  'missionSeq', 'distToWp', 'distToMav', 'timeInAir',
+  'battery', 'gpsStatus', 'satellites', 'gpsHdop',
 ];
 
 function loadKeys() {
