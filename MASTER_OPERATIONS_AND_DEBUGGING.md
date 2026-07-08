@@ -49,6 +49,40 @@ cd drone_gcs/node_api
 npm install
 ```
 
+### 1.3 Video Subsystem Dependencies (GStreamer / PyGObject)
+
+The WebRTC video pipeline (`video_service/`) needs `websockets` (for `/ws/video/signaling`)
+and `PyGObject` (for `import gi` → GStreamer bindings). Both are in `requirements.txt`, but
+**`PyGObject` only builds if the native GStreamer/GObject libraries are present on the host** —
+`pip install` alone is not enough on a fresh machine.
+
+Install the native deps first (macOS via Homebrew):
+
+```bash
+brew install gstreamer pygobject3 gobject-introspection pkgconf cairo
+```
+
+Then install Python deps as normal:
+
+```bash
+cd drone_gcs/python_service
+source .venv/bin/activate   # or venv/bin/activate — see note below
+pip install -r requirements.txt
+```
+
+Verify it worked:
+
+```bash
+python -c "import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string())"
+```
+
+Symptoms if this step is skipped:
+- Log shows `GStreamer unavailable: GStreamer Python bindings not available: No module named 'gi'`
+- `/ws/video/signaling` accepts the WebSocket, then immediately closes (server raises `RuntimeError` in `video_manager.attach_peer()` and closes the connection)
+
+**Venv folder name**: some machines use `.venv`, others use `venv` (no dot) — check which one
+exists in `drone_gcs/python_service/` before running `source .../bin/activate`.
+
 ---
 
 ## 2. STARTING THE STACK

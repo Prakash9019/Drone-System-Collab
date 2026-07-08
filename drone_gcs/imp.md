@@ -118,3 +118,69 @@ Part 1 — Draw and Upload the Fence
   7. Switch back to MISSION → plan your mission as before
   8. ARM → Set AUTO → Start Mission
   
+
+
+
+
+
+I now have the full picture — this repo already did the documentation consolidation and left a self-audit trail. Here's the breakdown.
+
+The short answer
+
+Yes — almost everything is centralized. There are 3 meta-docs at the root that already explain this exact situation:
+
+1. DOCUMENTATION_INDEX.md — the "start here" map of all docs
+2. DOCUMENTATION_MERGE_REPORT.md — a table showing which of the ~55 old files were merged into which master doc, and why
+3. REMOVE_THESE_FILES.md — the pre-vetted safe-to-delete list, with the exact rm commands (never executed)
+
+This happened on 2026-05-27, consolidating fragmented docs into 4 master docs.
+
+The 4 master docs (everything lives here now)
+
+┌────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                File                │                                                    Covers                                                    │
+├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ MASTER_GCS_ARCHITECTURE.md         │ Full system architecture — Python/Node/React layers, telemetry pipeline, vehicle state schema, API endpoints │
+├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ MASTER_FLIGHT_PLANNER.md           │ Mission, Fence, Survey Grid, mission execution debugging, premature-RTL and WP-counter root causes           │
+├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ MASTER_DATA_TAB.md                 │ Data/Flight tab — HUD, map, actions, modes, parameters, MissionExecutionPanel                                │
+├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ MASTER_OPERATIONS_AND_DEBUGGING.md │ Setup + run commands, SITL, flight workflow, all debugging playbooks, calibration, param reference           │
+└────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+How to start the app (from MASTER_OPERATIONS_AND_DEBUGGING.md §1–2)
+
+# Install (one-time)
+cd drone_gcs/frontend && npm install
+cd drone_gcs/python_service && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cd drone_gcs/node_api && npm install
+
+# Run — 3 terminals
+cd drone_gcs/python_service && source .venv/bin/activate && python main.py   # :8000
+cd drone_gcs/node_api && node server.js                                     # :8080
+cd drone_gcs/frontend && npm run dev                                         # :5173
+Open http://localhost:5173. SITL instructions (via the GCS Simulation page or manual sim_vehicle.py) are in §3 of the same doc.
+
+What's kept intentionally (not clutter)
+
+- Root-cause investigation docs: PREMATURE_RTL_ROOT_CAUSE.md, MISSION_AUTO_START_ROOT_CAUSE.md — confirmed findings with evidence, referenced from the master docs
+- Companion audit tables: FLIGHT_PLANNER_AUDIT_TABLE.md, FLIGHT_PLANNER_MISSION_AUDIT_TABLE.md, DATA_TAB_AUDIT_TABLE.md, LEVEL_CALIBRATION_AUDIT.md, DATA_TAB_GPS_ALTITUDE_AUDIT.md — line-by-line detail the master docs reference but don't inline
+- Historical context: MASTER_GCS_REQUIREMENTS.md, MISSION_PLANNER_PARITY_BOARD_REPORT.md
+- README.md — currently just a one-line title, not useful as-is
+
+Files marked safe to delete (already fully absorbed)
+
+~40 files, grouped in REMOVE_THESE_FILES.md:
+- Old "centralized" docs: FLIGHT_PLANNER_CENTRALIZED.md, FLIGHT_PLANNER_MISSION_CENTRALIZED.md, DATA_TAB_CENTRALIZED.md, MODERN_GCS_ARCHITECTURE.md
+- Design/flow docs: telemetry-engine-design.md, vehicle-state-schema.md, mavlink-ingestion.md, vehicle-state-model.md, currentstate-architecture.md, telemetry-flow.md, telemetry-state-flow.md, hud-architecture.md, event-bus-design.md, migration-roadmap.md, mission-map-flow.md, mission-sync-flow.md, parameter-sync-flow.md, preflight-validation-flow.md, replay-event-flow.md
+- Engine/migration notes: MISSION_ENGINE.md, MISSION_MIGRATION_NOTES.md, PARAMETER_ENGINE.md, PARAMETER_MIGRATION_NOTES.md, PREFLIGHT_ENGINE.md, PREFLIGHT_MIGRATION_NOTES.md, TELEMETRY_REPLAY_ENGINE.md, REPLAY_MIGRATION_NOTES.md, MAP_INTEGRATION.md, MAP_MIGRATION_NOTES.md
+- Stale audits: DATA_TAB_GAP_ANALYSIS.md, DATA_TAB_IMPLEMENTATION_PLAN.md, DATA_TAB_IMP.md, DATA_TAB_AUDIT_PROGRESS.md
+- Absorbed operational: FLIGHT_PLANNER_USER_GUIDE.md, try.md, walkthrough.md
+- Other: FEATURE_AUDIT_REPORT.md, FINAL_FEATURE_VERIFICATION_REPORT.md, PLAN_TAB_IMP.md, SETUP_TAB_IMP.md, GCS_DOCUMENTATION.md, VIDEO_SUBSYSTEM_PLAN.md (keep if video subsystem still planned)
+
+Full list with the exact rm commands is at the bottom of REMOVE_THESE_FILES.md. Per your standing preference, I read the audit docs before answering and made no edits or deletions — say the word if you want me to actually run the cleanup.
+
+✻ Brewed for 50s
+
+※ recap: Goal is decluttering the drone GCS repo's markdown docs; you asked me to survey them and I found everything's already centralized into 4 master docs with a pre-vetted delete list. Next: tell me if you want me to actually run that cleanup. (disable recaps in /config)

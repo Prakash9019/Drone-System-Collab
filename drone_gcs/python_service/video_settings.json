@@ -1,6 +1,6 @@
 {
-  "video_source": "RTSP",
-  "rtsp_url": "rtsp://184.72.239.149/vod/mp4:BigBuckBunny_175k.mov",
+  "video_source": "TCP_MPEGTS",
+  "rtsp_url": "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1",
   "rtsp_username": "",
   "rtsp_password": "",
   "rtsp_tcp_transport": true,
@@ -8,13 +8,13 @@
   "tcp_url": "",
   "aspect_ratio": 0.0,
   "video_fit": "FIT_HEIGHT",
-  "grid_lines": true,
+  "grid_lines": false,
   "recording_format": "MP4",
   "max_video_size_mb": 10240,
   "enable_storage_limit": false,
-  "stream_enabled": true,
+  "stream_enabled": false,
   "disable_when_disarmed": false,
-  "low_latency_mode": true,
-  "stream_timeout_s": 15,
+  "low_latency_mode": false,
+  "stream_timeout_s": 60,
   "frame_smoothing_enabled": false
 }

@@ -11,55 +11,12 @@ grep -r "FLIGHT_PLANNER_CENTRALIZED\|DATA_TAB_CENTRALIZED\|MODERN_GCS" . --inclu
 
 ## SAFE TO DELETE (content fully absorbed into master docs)
 
-### Design / Architecture Docs (→ MASTER_GCS_ARCHITECTURE.md)
-
-```
-telemetry-engine-design.md
-vehicle-state-schema.md
-mavlink-ingestion.md
-vehicle-state-model.md
-currentstate-architecture.md
-telemetry-flow.md
-telemetry-state-flow.md
-hud-architecture.md
-event-bus-design.md
-migration-roadmap.md
-```
-
-### Data Flow Diagrams (→ MASTER_GCS_ARCHITECTURE.md + MASTER_FLIGHT_PLANNER.md)
-
-```
-mission-map-flow.md
-mission-sync-flow.md
-parameter-sync-flow.md
-preflight-validation-flow.md
-replay-event-flow.md
-```
-
-### Engine / Migration Notes (→ master docs)
-
-```
-MISSION_ENGINE.md
-MISSION_MIGRATION_NOTES.md
-PARAMETER_ENGINE.md
-PARAMETER_MIGRATION_NOTES.md
-PREFLIGHT_ENGINE.md
-PREFLIGHT_MIGRATION_NOTES.md
-TELEMETRY_REPLAY_ENGINE.md
-REPLAY_MIGRATION_NOTES.md
-MAP_INTEGRATION.md
-MAP_MIGRATION_NOTES.md
-```
 
 ### Stale Audit Docs (superseded by master docs; claims contradicted by current code)
 
 ```
-DATA_TAB_GAP_ANALYSIS.md           ← stale: map waypoints/home/click-to-fly marked "missing" but exist
 DATA_TAB_IMPLEMENTATION_PLAN.md    ← stale: DO_REPOSITION marked "missing" but exists at MapView.jsx:769
 DATA_TAB_IMP.md                    ← high-level intent; absorbed
-DATA_TAB_AUDIT_PROGRESS.md         ← absorbed into MASTER_DATA_TAB.md §10
-docs/audit/data_screen_audit.md    ← stale: home marker/trail/overlays marked missing but all exist
-docs/audit/simulation_screen_audit.md  ← absorbed
 ```
 
 ### Old Centralized Docs (replaced by master docs)
@@ -77,11 +34,7 @@ MODERN_GCS_ARCHITECTURE.md          ← replaced by MASTER_GCS_ARCHITECTURE.md
 FLIGHT_PLANNER_USER_GUIDE.md
 try.md                              ← absorbed; superseded by PREMATURE_RTL_ROOT_CAUSE.md
 walkthrough.md
-drone_gcs/TROUBLESHOOTING.md
-docs/operations/mission_planner_operational_workflow.md
-docs/operations/complete_frontend_developer_user_guide.md
-docs/operations/frontend_testing_workflow_guide.md
-docs/operations/phase7_system_stability.md
+
 ```
 
 ### Other Absorbed Docs
@@ -94,9 +47,7 @@ SETUP_TAB_IMP.md
 VIDEO_SUBSYSTEM_PLAN.md             ← delete only if video subsystem is permanently deprioritized
 GCS_DOCUMENTATION.md                ← replaced by MASTER_GCS_ARCHITECTURE.md + MASTER_OPERATIONS docs
 drone_gcs/imp.md
-docs/audit/plan_screen_audit.md
-docs/audit/connect_module_audit.md
-docs/audit/config_tuning_audit.md
+
 ```
 
 ---
@@ -138,15 +89,6 @@ When ready to delete, run from the repo root:
 
 ```bash
 # Design / flow docs
-rm telemetry-engine-design.md vehicle-state-schema.md mavlink-ingestion.md vehicle-state-model.md
-rm currentstate-architecture.md telemetry-flow.md telemetry-state-flow.md hud-architecture.md
-rm event-bus-design.md migration-roadmap.md
-rm mission-map-flow.md mission-sync-flow.md parameter-sync-flow.md preflight-validation-flow.md replay-event-flow.md
-
-# Engine / migration notes
-rm MISSION_ENGINE.md MISSION_MIGRATION_NOTES.md PARAMETER_ENGINE.md PARAMETER_MIGRATION_NOTES.md
-rm PREFLIGHT_ENGINE.md PREFLIGHT_MIGRATION_NOTES.md TELEMETRY_REPLAY_ENGINE.md REPLAY_MIGRATION_NOTES.md
-rm MAP_INTEGRATION.md MAP_MIGRATION_NOTES.md
 
 # Stale audit docs
 rm DATA_TAB_GAP_ANALYSIS.md DATA_TAB_IMPLEMENTATION_PLAN.md DATA_TAB_IMP.md DATA_TAB_AUDIT_PROGRESS.md
@@ -168,7 +110,7 @@ rm "docs/operations/phase7_system_stability.md"
 rm FEATURE_AUDIT_REPORT.md FINAL_FEATURE_VERIFICATION_REPORT.md
 rm PLAN_TAB_IMP.md SETUP_TAB_IMP.md GCS_DOCUMENTATION.md
 rm drone_gcs/imp.md
-rm docs/audit/plan_screen_audit.md docs/audit/connect_module_audit.md docs/audit/config_tuning_audit.md
+
 ```
 
 **Do NOT run these without reviewing the list above first.**

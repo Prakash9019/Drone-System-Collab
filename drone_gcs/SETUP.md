@@ -39,6 +39,19 @@ sudo apt install -y gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly}
 
 In a terminal, navigate to the backend:
 
+
+cd "/Users/suryprakash/Drone System Collab/drone_gcs/python_service"
+source venv/bin/activate
+python main.py
+
+Terminal 2 — Node API gateway (port 8080)
+cd "/Users/suryprakash/Drone System Collab/drone_gcs/node_api"
+npm start
+
+Terminal 3 — Frontend (port 5173)
+cd "/Users/suryprakash/Drone System Collab/drone_gcs/frontend"
+npm run dev
+
 ```bash
 cd drone_gcs/drone_core
 pip install -r requirements.txt
