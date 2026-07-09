@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import useVideoStore from '../../store/useVideoStore';
+import RecordingControls from './RecordingControls';
 
 const SOURCES = [
   { value: 'DISABLED', label: 'Disabled' },
@@ -28,6 +29,9 @@ const VideoSettingsPanel = () => {
   const state = useVideoStore((s) => s.state);
   const banner = useVideoStore((s) => s.banner);
   const loading = useVideoStore((s) => s.loading);
+  const cameras = useVideoStore((s) => s.cameras);
+  const fetchCameras = useVideoStore((s) => s.fetchCameras);
+  const selectCameraStream = useVideoStore((s) => s.selectCameraStream);
 
   // Local editable copies for text inputs so typing isn't network-coupled
   const [rtspUrl, setRtspUrl] = useState(settings.rtsp_url);
@@ -38,7 +42,10 @@ const VideoSettingsPanel = () => {
 
   useEffect(() => {
     fetchSettings();
-  }, [fetchSettings]);
+    fetchCameras();
+    const id = setInterval(fetchCameras, 5000);
+    return () => clearInterval(id);
+  }, [fetchSettings, fetchCameras]);
 
   useEffect(() => {
     setRtspUrl(settings.rtsp_url);
@@ -73,7 +80,8 @@ const VideoSettingsPanel = () => {
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <h3 style={{ margin: 0, fontSize: 14, letterSpacing: 0.4 }}>VIDEO SOURCE</h3>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <RecordingControls />
           <button
             onClick={startVideo}
             disabled={loading || state.active}
@@ -90,6 +98,28 @@ const VideoSettingsPanel = () => {
           </button>
         </div>
       </div>
+
+      {cameras.length > 0 && (
+        <div style={{ ...rowStyle, flexDirection: 'column', gap: 6 }}>
+          <label style={labelStyle}>MAVLink cameras discovered</label>
+          {cameras.map((cam) => (
+            <div key={`${cam.sysid}-${cam.compid}`} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+              <span style={{ color: '#9ca3af' }}>
+                {cam.vendor_name || 'Unknown'} {cam.model_name} ({cam.stream_count}/{cam.expected_stream_count} streams)
+              </span>
+              {cam.streams.map((s) => (
+                <button
+                  key={s.stream_id}
+                  onClick={() => selectCameraStream(cam.sysid, cam.compid, s.stream_id)}
+                  style={{ ...btnStyle('#374151'), padding: '3px 8px', fontSize: 11 }}
+                >
+                  {s.name || `Stream ${s.stream_id}`}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
 
       {banner && (
         <div
@@ -227,6 +257,11 @@ const VideoSettingsPanel = () => {
           label="Grid lines"
           checked={settings.grid_lines}
           onChange={(v) => patchSettings({ grid_lines: v })}
+        />
+        <Toggle
+          label="Disable pixel aspect ratio correction"
+          checked={settings.disable_pixel_aspect_ratio}
+          onChange={(v) => patchSettings({ disable_pixel_aspect_ratio: v })}
         />
         {settings.video_source === 'RTSP' && (
           <Toggle

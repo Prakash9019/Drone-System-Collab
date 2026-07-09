@@ -34,6 +34,7 @@ from parameter_metadata import get_metadata_map
 from connection_manager import list_serial_ports_detailed
 from param_format import parse_param_text, format_param_text, diff_param_dicts
 from video_service import get_video_manager
+from camera_manager import CameraManager
 
 class ReplayStartRequest(BaseModel):
     session_id: str
@@ -52,6 +53,15 @@ parameter_manager = None
 sitl_manager = None
 osd_manager = None
 preflight_manager = None
+camera_manager = None
+
+
+def _get_primary_telemetry() -> dict | None:
+    """SubtitleWriter's telemetry source — the primary vehicle's live state dict."""
+    if not link_manager or not link_manager.primary_sysid:
+        return None
+    vehicle = link_manager.vehicles.get(link_manager.primary_sysid)
+    return vehicle.to_dict() if vehicle else None
 
 # ─── Compass calibration progress (populated via MAG_CAL callback) ────────────
 _mag_cal_data: dict = {}
@@ -96,7 +106,7 @@ def _register_bg_task(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global link_manager, mission_manager, telemetry_publisher, parameter_manager, sitl_manager, osd_manager, preflight_manager
+    global link_manager, mission_manager, telemetry_publisher, parameter_manager, sitl_manager, osd_manager, preflight_manager, camera_manager
     logger.info("Starting up MAVLink Service...")
     
     # Use auto-detect by default to find serial ports, fallback to SITL if needed
@@ -120,6 +130,10 @@ async def lifespan(app: FastAPI):
     sitl_manager = SITLManager()
     osd_manager = OSDProfileManager()
     preflight_manager = PreflightManager()
+    # Video subsystem's telemetry source is wired up front so SubtitleWriter can
+    # sample it the moment a recording starts, even before video routes are hit.
+    camera_manager = CameraManager(link_manager, get_video_manager(get_telemetry=_get_primary_telemetry))
+    link_manager.camera_manager = camera_manager
     # Register MAG_CAL callback for compass calibration progress
     link_manager._mag_cal_cb = _mag_cal_callback
     # Register accel cal position callback (FC sends COMMAND_LONG 42429 to request each position)
@@ -1279,6 +1293,80 @@ async def video_start():
 @app.post("/video/stop")
 async def video_stop():
     return await get_video_manager().stop()
+
+
+@app.post("/video/record/start")
+async def video_record_start(body: dict | None = None):
+    fmt = (body or {}).get("format")
+    try:
+        return await get_video_manager().start_recording(fmt)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/video/record/stop")
+async def video_record_stop():
+    return await get_video_manager().stop_recording()
+
+
+@app.post("/video/snapshot")
+async def video_snapshot():
+    try:
+        png_bytes = await get_video_manager().snapshot()
+    except (RuntimeError, asyncio.TimeoutError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    from fastapi.responses import Response
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@app.get("/cameras")
+async def cameras_list():
+    if not camera_manager:
+        return []
+    return camera_manager.list_cameras()
+
+
+@app.post("/cameras/{sysid}/{compid}/{stream_id}/select")
+async def cameras_select_stream(sysid: int, compid: int, stream_id: int):
+    if not camera_manager:
+        raise HTTPException(status_code=500, detail="camera manager not initialized")
+    ok = await camera_manager.select_stream(sysid, compid, stream_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="camera/stream not found")
+    return {"ok": True}
+
+
+@app.websocket("/ws/video/raw")
+async def video_raw_ws(ws: WebSocket):
+    """WebCodecs fallback: binary frames `[timestamp_us: u64 BE][NAL payload]`."""
+    await ws.accept()
+    vm = get_video_manager()
+    peer = None
+
+    async def send_bytes(data: bytes) -> None:
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            logger.debug("raw video send failed (peer likely closed)")
+
+    try:
+        peer = await vm.attach_raw_peer(send_bytes)
+    except Exception as e:
+        await ws.close(code=1011, reason=str(e))
+        return
+
+    try:
+        while True:
+            # Client has nothing to send us on this channel; just keep the
+            # connection alive and detect disconnects.
+            await ws.receive()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("raw video ws loop error")
+    finally:
+        if peer:
+            await vm.detach_raw_peer(peer.peer_id)
 
 
 @app.websocket("/ws/video/signaling")

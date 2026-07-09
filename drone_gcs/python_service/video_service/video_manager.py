@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .gst_video_receiver import GstUnavailableError, GstVideoReceiver
 from .settings import RESTART_FIELDS, SettingsStore, VideoSettings, VideoSource
@@ -37,13 +37,16 @@ def _classify_error(msg: str) -> str:
 
 
 class VideoManager:
-    def __init__(self) -> None:
+    def __init__(self, get_telemetry: Callable[[], dict[str, Any] | None] | None = None) -> None:
         self._store = SettingsStore()
         self._receiver: GstVideoReceiver | None = None
         self._lock = asyncio.Lock()
         self._gst_error: str | None = None
         self._restart_pending: asyncio.Task | None = None
         self._fail_count: int = 0
+        # Injected from main.py: returns the primary vehicle's telemetry dict
+        # (VehicleState.to_dict()-shaped) for SubtitleWriter to sample.
+        self._get_telemetry = get_telemetry or (lambda: None)
 
     # ─── Properties ────────────────────────────────────────────────────────
     @property
@@ -55,8 +58,10 @@ class VideoManager:
             "active": False,
             "encoding": None,
             "peer_count": 0,
+            "raw_peer_count": 0,
             "last_buffer_age_s": None,
             "last_error": None,
+            "recording": {"active": False, "filepath": None, "elapsed_s": None},
         }
         # Prefer the classified manager-level error; fall back to raw receiver error
         error = self._gst_error or rx.get("last_error")
@@ -82,7 +87,7 @@ class VideoManager:
                 self._gst_error = "Source has no URL/port configured"
                 return self.state()
             try:
-                receiver = GstVideoReceiver(self._store.settings)
+                receiver = GstVideoReceiver(self._store.settings, get_telemetry=self._get_telemetry)
                 receiver.on_timeout = self._on_receiver_timeout
                 await receiver.start()
                 self._receiver = receiver
@@ -118,8 +123,15 @@ class VideoManager:
             await self._restart()
         return self.state()
 
+    # Audit fix (gap #11): QGC delays the restart by 1s after stop-complete
+    # (VideoManager.cc:929-932, `QTimer::singleShot(1000, ...)`) to avoid racing the
+    # OS on socket/port release — an immediate rebind of the same UDP port can fail
+    # spuriously on some platforms right after teardown. Match that here.
+    _RESTART_DELAY_S = 1.0
+
     async def _restart(self) -> None:
         await self.stop()
+        await asyncio.sleep(self._RESTART_DELAY_S)
         await self.start()
 
     # ─── Peers (signaling endpoint calls these) ────────────────────────────
@@ -134,6 +146,36 @@ class VideoManager:
     async def detach_peer(self, peer_id: str) -> None:
         if self._receiver is not None:
             await self._receiver.remove_peer(peer_id)
+
+    # ─── Raw-NAL peers (WebCodecs fallback signaling endpoint calls these) ────
+    async def attach_raw_peer(self, send_bytes):  # type: ignore[no-untyped-def]
+        if self._receiver is None:
+            await self.start()
+        if self._receiver is None:
+            raise RuntimeError(self._gst_error or "video pipeline not running")
+        return await self._receiver.add_raw_peer(send_bytes)
+
+    async def detach_raw_peer(self, peer_id: str) -> None:
+        if self._receiver is not None:
+            await self._receiver.remove_raw_peer(peer_id)
+
+    # ─── Recording / snapshot (REST routes call these) ─────────────────────
+    async def start_recording(self, fmt: str | None = None) -> dict[str, Any]:
+        if self._receiver is None:
+            await self.start()
+        if self._receiver is None:
+            raise RuntimeError(self._gst_error or "video pipeline not running")
+        return await self._receiver.start_recording(fmt)
+
+    async def stop_recording(self) -> dict[str, Any]:
+        if self._receiver is None:
+            return {"active": False, "filepath": None}
+        return await self._receiver.stop_recording()
+
+    async def snapshot(self) -> bytes:
+        if self._receiver is None:
+            raise RuntimeError(self._gst_error or "video pipeline not running")
+        return await self._receiver.snapshot()
 
     # ─── Watchdog response ─────────────────────────────────────────────────
     async def _on_receiver_timeout(self) -> None:
@@ -161,8 +203,16 @@ class VideoManager:
 _singleton: VideoManager | None = None
 
 
-def get_video_manager() -> VideoManager:
+def get_video_manager(
+    get_telemetry: Callable[[], dict[str, Any] | None] | None = None,
+) -> VideoManager:
+    """Returns the process-wide VideoManager, constructing it on first call.
+
+    `get_telemetry` only takes effect on the first call (main.py wires it once at
+    startup, before any route handler can call this with no args and get a bare
+    instance).
+    """
     global _singleton
     if _singleton is None:
-        _singleton = VideoManager()
+        _singleton = VideoManager(get_telemetry=get_telemetry)
     return _singleton

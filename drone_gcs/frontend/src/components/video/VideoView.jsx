@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import useVideoStore, { FIT_TO_CSS } from '../../store/useVideoStore';
 import { VideoClient } from '../../utils/webrtcClient';
+import VideoCanvas from './VideoCanvas';
 
 const VideoView = () => {
   const videoRef = useRef(null);
@@ -11,6 +12,11 @@ const VideoView = () => {
   const fetchState = useVideoStore((s) => s.fetchState);
   const [connState, setConnState] = useState('idle');
   const [error, setError] = useState('');
+  // Client-side rendering choice only (not persisted to backend settings) — the
+  // backend already serves both /ws/video/signaling (WebRTC) and /ws/video/raw
+  // (WebCodecs) simultaneously off the same pipeline, so switching here doesn't
+  // touch the video_source/stream config at all.
+  const [renderMode, setRenderMode] = useState('webrtc');
 
   // Poll backend state every 2 s — cheap and saves a second WS just for state
   useEffect(() => {
@@ -20,6 +26,7 @@ const VideoView = () => {
   }, [fetchState]);
 
   useEffect(() => {
+    if (renderMode !== 'webrtc') return;
     if (settings.video_source === 'DISABLED' || !settings.stream_enabled) {
       if (clientRef.current) {
         clientRef.current.close();
@@ -47,7 +54,7 @@ const VideoView = () => {
       client.close();
       clientRef.current = null;
     };
-  }, [settings.video_source, settings.stream_enabled, settings.rtsp_url, settings.udp_port, settings.tcp_url, settings.low_latency_mode]);
+  }, [renderMode, settings.video_source, settings.stream_enabled, settings.rtsp_url, settings.udp_port, settings.tcp_url, settings.low_latency_mode]);
 
   const handleDoubleClick = () => {
     const el = containerRef.current;
@@ -75,43 +82,81 @@ const VideoView = () => {
         overflow: 'hidden',
       }}
     >
-      <video
-        ref={videoRef}
-        autoPlay
-        muted
-        playsInline
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: fitMode,
-          display: showPlaceholder ? 'none' : 'block',
-        }}
-      />
-      {showPlaceholder && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#9ca3af',
-            fontFamily: 'monospace',
-            fontSize: 14,
-            textAlign: 'center',
-            padding: 20,
-          }}
-        >
-          {settings.video_source === 'DISABLED' || !settings.stream_enabled
-            ? 'Video disabled — configure a source below'
-            : `Connecting… (${connState})`}
-        </div>
+      {renderMode === 'webrtc' ? (
+        <>
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: fitMode,
+              display: showPlaceholder ? 'none' : 'block',
+              // Audit fix (gap #4): QGC's `disablePixelAspectRatio` fact forces a
+              // capsfilter PAR=1/1 in its GStreamer pipeline. Our <video> element has no
+              // backend decode step to correct, so the equivalent here is overriding the
+              // browser's automatic PAR handling with an explicit CSS aspect-ratio when
+              // the user has configured one; otherwise fall back to the stream's own
+              // intrinsic (PAR-corrected) size.
+              ...(settings.disable_pixel_aspect_ratio && settings.aspect_ratio > 0
+                ? { aspectRatio: String(settings.aspect_ratio) }
+                : {}),
+            }}
+          />
+          {showPlaceholder && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#9ca3af',
+                fontFamily: 'monospace',
+                fontSize: 14,
+                textAlign: 'center',
+                padding: 20,
+              }}
+            >
+              {settings.video_source === 'DISABLED' || !settings.stream_enabled
+                ? 'Video disabled — configure a source below'
+                : `Connecting… (${connState})`}
+            </div>
+          )}
+          {settings.grid_lines && !showPlaceholder && <GridOverlay />}
+        </>
+      ) : (
+        <VideoCanvas grid={settings.grid_lines} />
       )}
-      {settings.grid_lines && !showPlaceholder && <GridOverlay />}
-      <StatusBar state={state} connState={connState} error={error} />
+      <RenderModeToggle mode={renderMode} onChange={setRenderMode} />
+      {renderMode === 'webrtc' && <StatusBar state={state} connState={connState} error={error} />}
     </div>
   );
 };
+
+const RenderModeToggle = ({ mode, onChange }) => (
+  <button
+    onClick={() => onChange(mode === 'webrtc' ? 'webcodecs' : 'webrtc')}
+    title="Switch between WebRTC (adaptive, jitter-buffered) and WebCodecs (raw NAL, lowest latency) rendering — both are served by the same backend pipeline simultaneously"
+    style={{
+      position: 'absolute',
+      top: 8,
+      right: 8,
+      background: 'rgba(0,0,0,0.55)',
+      color: '#e5e7eb',
+      border: '1px solid #374151',
+      borderRadius: 4,
+      padding: '4px 8px',
+      fontFamily: 'monospace',
+      fontSize: 11,
+      cursor: 'pointer',
+    }}
+  >
+    {mode === 'webrtc' ? 'WebRTC ▸ switch to WebCodecs' : 'WebCodecs ▸ switch to WebRTC'}
+  </button>
+);
 
 const GridOverlay = () => (
   <svg

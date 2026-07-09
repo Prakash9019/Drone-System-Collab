@@ -597,6 +597,56 @@ app.post('/api/video/stop', async (req, res) => {
   }
 });
 
+app.post('/api/video/record/start', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/video/record/start`, req.body || {});
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to start recording', details: err.response?.data || err.message });
+  }
+});
+
+app.post('/api/video/record/stop', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/video/record/stop`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop recording', details: err.message });
+  }
+});
+
+app.post('/api/video/snapshot', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/video/snapshot`, {}, { responseType: 'arraybuffer' });
+    res.set('Content-Type', 'image/png');
+    res.send(Buffer.from(response.data));
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to take snapshot', details: err.message });
+  }
+});
+
+app.get('/api/cameras', async (req, res) => {
+  try {
+    const response = await axios.get(`${PYTHON_API_URL}/cameras`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch cameras', details: err.message });
+  }
+});
+
+app.post('/api/cameras/:sysid/:compid/:streamId/select', async (req, res) => {
+  try {
+    const { sysid, compid, streamId } = req.params;
+    const response = await axios.post(`${PYTHON_API_URL}/cameras/${sysid}/${compid}/${streamId}/select`);
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: 'Failed to select camera stream', details: err.response?.data || err.message });
+  }
+});
+
 app.get('/api/parameters/metadata', async (req, res) => {
   try {
     const response = await axios.get(`${PYTHON_API_URL}/parameters/metadata`);

@@ -58,8 +58,28 @@ class VideoSettings:
     stream_enabled: bool = True
     disable_when_disarmed: bool = False
     low_latency_mode: bool = False
+    # Audit note (gap #6): QGC has no single generic "stream timeout" — only
+    # `rtspTimeout` (default 8s, VideoSettings.h:27), applied to RTSP sources only;
+    # every other source gets a hardcoded 3s connect timeout (VideoManager.cc:839-842).
+    # This is a deliberate simplification, not a port: one unified timeout applied to
+    # every source type, kept because it's simpler UX and there's no evidence QGC's
+    # split was anything other than a historical default.
     stream_timeout_s: int = 8
     frame_smoothing_enabled: bool = False
+    # Audit fix (gap #4): QGC VideoSettings.h:23 `showRecControl` — was named in the
+    # migration plan's prose but missing from the actual settings table/port.
+    show_rec_control: bool = True
+    # Audit fix (gap #4): QGC VideoSettings.h:34 `disablePixelAspectRatio` — unlike
+    # forceCpuVideoPath/videoConversionElement (which are N/A here since decode never
+    # happens on our backend), this one matters: non-square-pixel sources need PAR
+    # correction before the frontend's object-fit sizing is correct.
+    disable_pixel_aspect_ratio: bool = False
+    # NOTE (audit gap #4): QGC's `forceCpuVideoPath` and `videoConversionElement` facts
+    # are intentionally NOT ported. Both control which GStreamer element converts decoded
+    # pixel formats before rendering — in QGC's same-process pipeline. Our backend never
+    # decodes on the WebRTC primary path (browser does it) and never converts pixel formats
+    # on the WebCodecs fallback path (raw NAL passthrough), so there is no backend-side
+    # decode/convert step for these facts to control.
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

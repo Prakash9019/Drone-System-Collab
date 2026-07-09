@@ -393,6 +393,15 @@ class LinkManager:
                     if msg.get_type() == 'COMMAND_ACK':
                         if hasattr(self, 'command_manager') and self.command_manager:
                             self.command_manager.on_command_ack(msg)
+
+                    # Route camera-discovery messages (HEARTBEAT from camera compids,
+                    # CAMERA_INFORMATION, VIDEO_STREAM_INFORMATION) to CameraManager.
+                    if mtype in ('HEARTBEAT', 'CAMERA_INFORMATION', 'VIDEO_STREAM_INFORMATION'):
+                        if hasattr(self, 'camera_manager') and self.camera_manager:
+                            try:
+                                self.camera_manager.handle_message(msg)
+                            except Exception:
+                                logger.exception("camera_manager.handle_message failed")
                         
                     sysid = msg.get_srcSystem()
                     compid = msg.get_srcComponent()
