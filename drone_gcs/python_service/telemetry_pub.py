@@ -38,6 +38,11 @@ class TelemetryPublisher:
         self.running = True
         if self.health:
             self.health.set_publisher_up(True)
+        if self.metrics:
+            try:
+                self.metrics.zmq_publisher_up.set(1)
+            except Exception:
+                logger.exception("failed to set zmq_publisher_up gauge")
         logger.info("ZeroMQ Telemetry Publisher bound", extra={"bind_addr": bind_addr})
 
     async def _send_zmq(self, payload: dict):
@@ -198,6 +203,11 @@ class TelemetryPublisher:
         self.running = False
         if self.health:
             self.health.set_publisher_up(False)
+        if self.metrics:
+            try:
+                self.metrics.zmq_publisher_up.set(0)
+            except Exception:
+                logger.exception("failed to clear zmq_publisher_up gauge")
         try:
             self.socket.close()
         except Exception:
