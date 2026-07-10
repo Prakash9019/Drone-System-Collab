@@ -35,6 +35,14 @@ from connection_manager import list_serial_ports_detailed
 from param_format import parse_param_text, format_param_text, diff_param_dicts
 from video_service import get_video_manager
 from camera_manager import CameraManager
+from fleet import SessionRegistry, DEFAULT_DRONE_ID
+from fleet import routes as fleet_routes
+from observability import (
+    load_config, ConfigError, HealthState, get_metrics,
+    setup_logging, request_id_var, new_request_id,
+)
+from starlette.requests import Request
+from starlette.responses import Response, JSONResponse
 
 class ReplayStartRequest(BaseModel):
     session_id: str
@@ -42,9 +50,30 @@ class ReplayStartRequest(BaseModel):
 class ReplaySeekRequest(BaseModel):
     time_s: float
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+# Phase 5A: validate configuration once, at import, and fail fast on a bad env
+# before any socket is bound. setup_logging installs the JSON formatter so every
+# line downstream is structured with correlation IDs.
+try:
+    service_config = load_config()
+except ConfigError as _cfg_err:
+    setup_logging("error")
+    logging.getLogger(__name__).error(
+        "configuration invalid — refusing to start", extra={"errors": _cfg_err.errors}
+    )
+    raise SystemExit(1)
+
+setup_logging(service_config.log_level)
 logger = logging.getLogger(__name__)
+
+# Observability singletons shared by the lifespan, endpoints, and middleware.
+health = HealthState(grace_s=service_config.readiness_grace_s)
+metrics = get_metrics()
+
+# Fleet registry — owns all DroneSessions. The module globals below alias the
+# "default" session's managers so every legacy (unscoped) route keeps working
+# unchanged; fleet routes under /fleet address sessions by drone_id.
+session_registry: SessionRegistry | None = None
+default_session = None
 
 link_manager = None
 mission_manager = None
@@ -63,37 +92,15 @@ def _get_primary_telemetry() -> dict | None:
     vehicle = link_manager.vehicles.get(link_manager.primary_sysid)
     return vehicle.to_dict() if vehicle else None
 
-# ─── Compass calibration progress (populated via MAG_CAL callback) ────────────
-_mag_cal_data: dict = {}
+# ─── Calibration progress state (moved into DroneSession — per-drone) ────────
+# Legacy routes read the default session's calibration state via these helpers.
 
-def _mag_cal_callback(mtype: str, msg) -> None:
-    global _mag_cal_data
-    cid = int(getattr(msg, 'compass_id', 0))
-    if mtype == 'MAG_CAL_PROGRESS':
-        _mag_cal_data[cid] = {
-            'type': 'progress',
-            'pct': float(getattr(msg, 'completion_pct', 0)),
-            'cal_status': int(getattr(msg, 'cal_status', 0)),
-            'ts': _time.time(),
-        }
-    elif mtype == 'MAG_CAL_REPORT':
-        _mag_cal_data[cid] = {
-            'type': 'report',
-            'cal_status': int(getattr(msg, 'cal_status', 0)),
-            'fitness': float(getattr(msg, 'fitness', 0.0)),
-            'ofs_x': float(getattr(msg, 'ofs_x', 0)),
-            'ofs_y': float(getattr(msg, 'ofs_y', 0)),
-            'ofs_z': float(getattr(msg, 'ofs_z', 0)),
-            'autosaved': int(getattr(msg, 'autosaved', 0)),
-            'ts': _time.time(),
-        }
+def _default_mag_cal_data() -> dict:
+    return default_session.mag_cal_data if default_session else {}
 
-# ─── Accel cal position tracking (populated when FC sends COMMAND_LONG 42429) ─
-_accel_cal_pos: int = 0  # 0=none, 1=Level, 2=Left, 3=Right, 4=NoseDown, 5=NoseUp, 6=Back
 
-def _accel_cal_pos_callback(pos: int) -> None:
-    global _accel_cal_pos
-    _accel_cal_pos = pos
+def _default_accel_cal_pos() -> int:  # 0=none, 1=Level, 2=Left, 3=Right, 4=NoseDown, 5=NoseUp, 6=Back
+    return default_session.accel_cal_pos if default_session else 0
 
 _sitl_bg_tasks: set[asyncio.Task] = set()
 _sitl_auto_connect_task: asyncio.Task | None = None
@@ -106,59 +113,81 @@ def _register_bg_task(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global session_registry, default_session
     global link_manager, mission_manager, telemetry_publisher, parameter_manager, sitl_manager, osd_manager, preflight_manager, camera_manager
+    health.reset_for_startup()
     logger.info("Starting up MAVLink Service...")
-    
+
     # Use auto-detect by default to find serial ports, fallback to SITL if needed
     # connection_string = "auto"
     # connection_string = "udp:127.0.0.1:14550"
 
-    connection_string = os.environ.get("DRONE_CONNECTION_STRING", "auto")
-    baudrate = int(os.environ.get("DRONE_BAUDRATE", "115200"))
-    fwd = os.environ.get("DRONE_UDP_FORWARD", "").strip()
-    udp_endpoints = [x.strip() for x in fwd.split(",") if x.strip()]
-    
-    link_manager = LinkManager(
+    connection_string = service_config.connection_string
+    baudrate = service_config.baudrate
+    udp_endpoints = list(service_config.udp_forwarding_endpoints)
+
+    session_registry = SessionRegistry()
+    fleet_routes.set_registry(session_registry)
+
+    # The default session preserves the single-drone GCS behavior. Only it gets
+    # a CameraManager — the video subsystem is still a process singleton until
+    # Phase 6 converts it to a per-stream registry.
+    # Video subsystem's telemetry source is wired up front so SubtitleWriter can
+    # sample it the moment a recording starts, even before video routes are hit.
+    default_session = session_registry.create(
+        drone_id=DEFAULT_DRONE_ID,
+        name=service_config.drone_name,
         connection_string=connection_string,
         baudrate=baudrate,
         udp_forwarding_endpoints=udp_endpoints,
+        camera_manager_factory=lambda lm: CameraManager(
+            lm, get_video_manager(get_telemetry=_get_primary_telemetry)
+        ),
     )
-    mission_manager = MissionManager(link_manager)
-    link_manager.mission_manager = mission_manager
-    parameter_manager = ParameterSyncManager(link_manager)
-    link_manager.parameter_manager = parameter_manager
+
+    # Legacy module-global aliases — every unscoped route below uses these and
+    # keeps working exactly as before the fleet refactor.
+    link_manager = default_session.link_manager
+    mission_manager = default_session.mission_manager
+    parameter_manager = default_session.parameter_manager
+    preflight_manager = default_session.preflight_manager
+    camera_manager = default_session.camera_manager
+
     sitl_manager = SITLManager()
     osd_manager = OSDProfileManager()
-    preflight_manager = PreflightManager()
-    # Video subsystem's telemetry source is wired up front so SubtitleWriter can
-    # sample it the moment a recording starts, even before video routes are hit.
-    camera_manager = CameraManager(link_manager, get_video_manager(get_telemetry=_get_primary_telemetry))
-    link_manager.camera_manager = camera_manager
-    # Register MAG_CAL callback for compass calibration progress
-    link_manager._mag_cal_cb = _mag_cal_callback
-    # Register accel cal position callback (FC sends COMMAND_LONG 42429 to request each position)
-    link_manager._accel_cal_pos_cb = _accel_cal_pos_callback
-    
-    # Setup ZMQ Telemetry Publisher
-    telemetry_publisher = TelemetryPublisher(port=5556, preflight_manager=preflight_manager)
+
+    # Setup ZMQ Telemetry Publisher — publishes every fleet session, tagged with
+    # drone_id. Health + metrics hooks make the publish loop observable and the
+    # bounded send-retry policy comes from validated config.
+    telemetry_publisher = TelemetryPublisher(
+        port=service_config.zmq_port,
+        preflight_manager=preflight_manager,
+        health=health,
+        metrics=metrics,
+        send_max_retries=service_config.zmq_send_max_retries,
+        send_backoff_ms=service_config.zmq_send_backoff_ms,
+    )
     telemetry_publisher.start()
-    
+
     tasks = [
-        asyncio.create_task(telemetry_publisher.publish_loop(link_manager))
+        asyncio.create_task(telemetry_publisher.publish_loop(session_registry))
     ]
-    
+
+    logger.info("MAVLink Service ready", extra={"config": service_config.to_public_dict()})
+
     yield
-    
+
     logger.info("Shutting down MAVLink Service...")
-    
+    health.mark_shutting_down()
+
     # Cancel all background tasks managed by lifespan
     for t in tasks:
         t.cancel()
-    
+
     if telemetry_publisher:
         telemetry_publisher.stop()
-    if link_manager:
-        await link_manager.close()
+    if session_registry:
+        await session_registry.close_all()
     try:
         await get_video_manager().shutdown()
     except Exception:
@@ -167,6 +196,71 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(lifespan=lifespan, title="Drone GCS Python Service")
+
+
+# ─── Phase 5A: correlation-id + request metrics middleware ───────────────────
+@app.middleware("http")
+async def correlation_and_metrics(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or new_request_id()
+    token = request_id_var.set(request_id)
+    start = _time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["x-request-id"] = request_id
+        return response
+    except Exception:
+        # Panic recovery: never leak a stack trace / hang the socket. Log with the
+        # correlation id and return clean JSON.
+        logger.exception("unhandled_request_error", extra={"path": request.url.path})
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error", "request_id": request_id},
+            headers={"x-request-id": request_id},
+        )
+    finally:
+        # Use the templated route ('/drones/{drone_id}') not the raw path to keep
+        # metric cardinality bounded; unmatched paths collapse to a single label.
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", None) or "unmatched"
+        duration = _time.perf_counter() - start
+        try:
+            metrics.http_requests.labels(
+                method=request.method, route=route_path, status=str(status_code)
+            ).inc()
+            metrics.http_duration.labels(method=request.method, route=route_path).observe(duration)
+        except Exception:
+            pass
+        logger.info("http_request", extra={
+            "method": request.method, "route": route_path,
+            "status": status_code, "duration_ms": round(duration * 1000, 1),
+        })
+        request_id_var.reset(token)
+
+
+# ─── Operational endpoints ────────────────────────────────────────────────────
+@app.get("/healthz")
+async def healthz():
+    live = health.liveness()
+    return JSONResponse(status_code=200 if live["status"] != "shutting_down" else 503, content=live)
+
+
+@app.get("/readyz")
+async def readyz():
+    r = health.readiness()
+    return JSONResponse(status_code=200 if r["ready"] else 503, content=r)
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    if not service_config.metrics_enabled:
+        raise HTTPException(status_code=404, detail="metrics disabled")
+    health.set_publisher_up(bool(telemetry_publisher and telemetry_publisher.running))
+    return Response(content=metrics.expose(), media_type=metrics.content_type)
+
+
+app.include_router(fleet_routes.router)
 
 @app.get("/state")
 async def get_state():
@@ -880,8 +974,7 @@ async def accel_confirm(req: AccelConfirmRequest):
     """Send ACCELCAL_VEHICLE_POS (42429) confirmation back to vehicle after user places drone."""
     if not link_manager or not link_manager.primary_sysid:
         raise HTTPException(status_code=500, detail="No vehicle connected")
-    global _accel_cal_pos
-    pos = req.position if req.position > 0 else _accel_cal_pos
+    pos = req.position if req.position > 0 else _default_accel_cal_pos()
     out = await link_manager.send_command(
         link_manager.primary_sysid,
         link_manager.primary_compid,
@@ -897,8 +990,7 @@ async def compass_cancel():
     """Send DO_CANCEL_MAG_CAL (42426) to stop compass calibration on the vehicle."""
     if not link_manager or not link_manager.primary_sysid:
         raise HTTPException(status_code=500, detail="No vehicle connected")
-    global _mag_cal_data
-    _mag_cal_data.clear()
+    _default_mag_cal_data().clear()
     out = await link_manager.send_command(
         link_manager.primary_sysid,
         link_manager.primary_compid,
@@ -928,11 +1020,11 @@ async def calibration_status_endpoint():
                     pass
     # Compass progress: filter stale entries (>30s)
     now = _time.time()
-    compass = {k: v for k, v in _mag_cal_data.items() if now - v.get('ts', 0) < 30}
+    compass = {k: v for k, v in _default_mag_cal_data().items() if now - v.get('ts', 0) < 30}
     return {
         "messages": msgs,
         "compass_progress": compass,
-        "accel_requested_pos": _accel_cal_pos,  # 0=none, 1-6=position FC is requesting
+        "accel_requested_pos": _default_accel_cal_pos(),  # 0=none, 1-6=position FC is requesting
     }
 
 

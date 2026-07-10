@@ -1,48 +1,123 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
-const zmq = require('zeromq');
 const axios = require('axios');
 const cors = require('cors');
 const multer = require('multer');
 const FormData = require('form-data');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
-const HTTP_PORT = 8080;
-const PYTHON_API_URL = 'http://127.0.0.1:8000';
-const ZMQ_PUB_URL = 'tcp://127.0.0.1:5556';
+// ─── Phase 5A production hardening: config, logging, metrics, health ──────────
+const { loadConfigOrExit } = require('./lib/config');
+const { Logger, runWithContext } = require('./lib/logger');
+const { createMetrics } = require('./lib/metrics');
+const { HealthState } = require('./lib/health');
+const { ZmqTelemetrySubscriber } = require('./ws/zmqSubscriber');
+const { createBroadcaster } = require('./ws/broadcaster');
+
+// Fail fast on misconfiguration BEFORE binding any port or socket.
+const config = loadConfigOrExit(process.env);
+
+const log = new Logger({ level: config.logLevel, service: config.serviceName });
+const metrics = createMetrics({ serviceName: config.serviceName });
+const health = new HealthState({ staleMs: config.zmqStaleMs, graceMs: config.readinessGraceMs });
+
+const HTTP_PORT = config.httpPort;
+const PYTHON_API_URL = config.pythonApiUrl;
+const ZMQ_PUB_URL = config.zmqPubUrl;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Correlation-id + request-scoped logging/metrics. Runs first so every handler
+// (and its async continuations) inherits `request_id` via AsyncLocalStorage.
+app.use((req, res, next) => {
+  const requestId = String(req.headers['x-request-id'] || crypto.randomUUID());
+  res.setHeader('x-request-id', requestId);
+  const startNs = process.hrtime.bigint();
+  res.on('finish', () => {
+    const route = (req.route && req.route.path) || req.path || 'unmatched';
+    const labels = { method: req.method, route, status: String(res.statusCode) };
+    const durationS = Number(process.hrtime.bigint() - startNs) / 1e9;
+    try {
+      metrics.httpRequests.inc(labels);
+      metrics.httpDuration.observe(labels, durationS);
+    } catch { /* metrics must never break a response */ }
+    log.info('http_request', { request_id: requestId, method: req.method, route, status: res.statusCode, duration_ms: Math.round(durationS * 1000) });
+  });
+  runWithContext({ request_id: requestId }, next);
+});
+
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 52 * 1024 * 1024 } });
 
 const { TelemetryCoreEngine, TelemetryEventBus } = require('./telemetry');
+const { SubscriptionManager } = require('./ws/subscriptionManager');
 
 // Set up WebSocket server attached to Express HTTP server
 const server = app.listen(HTTP_PORT, () => {
-  console.log(`Node.js API Gateway running on port ${HTTP_PORT}`);
+  log.info('gateway_listening', { port: HTTP_PORT, python_api: PYTHON_API_URL, zmq: ZMQ_PUB_URL });
 });
 
 const wss = new WebSocketServer({ server });
+const subscriptions = new SubscriptionManager();
 
 wss.on('connection', (ws) => {
-  console.log('Client connected to WebSocket telemetry stream');
-  ws.on('close', () => console.log('Client disconnected'));
+  metrics.wsClients.inc();
+  log.info('ws_client_connected', { clients: wss.clients.size });
+  subscriptions.addClient(ws);
+  ws.on('close', () => {
+    metrics.wsClients.dec();
+    log.info('ws_client_disconnected', { clients: wss.clients.size });
+  });
+  ws.on('error', (err) => log.warn('ws_client_error', { error: String(err && err.message || err) }));
 });
 
-// Broadcast helper
-function broadcast(data) {
-  wss.clients.forEach((client) => {
-    if (client.readyState === 1) { // WebSocket.OPEN
-      client.send(data);
-    }
-  });
+// Broadcast helper — droneId-aware subscription filtering + slow-client
+// send-queue cap (see ws/broadcaster.js). Per-drone last-seen is tracked for
+// the drone_last_seen_age metric exposed at /metrics.
+const _sendFrame = createBroadcaster({ metrics, softCapBytes: config.wsMaxSendQueueBytes, subscriptions, logger: log });
+const droneLastSeen = new Map();
+function broadcast(data, droneId) {
+  if (droneId != null) {
+    droneLastSeen.set(String(droneId), Date.now());
+    try { metrics.telemetryFramesProcessed.inc({ drone_id: String(droneId) }); } catch { /* ignore */ }
+  }
+  _sendFrame(wss.clients, data, droneId);
 }
 
 const telemetryBus = new TelemetryEventBus();
 const telemetryEngine = new TelemetryCoreEngine({ broadcast, bus: telemetryBus });
+
+// ─── Operational endpoints: health, readiness, metrics ───────────────────────
+app.get('/healthz', (req, res) => {
+  const l = health.liveness();
+  res.status(l.status === 'shutting_down' ? 503 : 200).json(l);
+});
+
+app.get('/readyz', (req, res) => {
+  const r = health.readiness();
+  res.status(r.ready ? 200 : 503).json(r);
+});
+
+app.get('/metrics', async (req, res) => {
+  if (!config.metricsEnabled) return res.status(404).end();
+  try {
+    // Refresh age gauges at scrape time.
+    const now = Date.now();
+    metrics.zmqConnected.set(health.zmqConnected ? 1 : 0);
+    metrics.zmqLastFrameAge.set(health.lastFrameAt == null ? -1 : (now - health.lastFrameAt) / 1000);
+    for (const [droneId, seenAt] of droneLastSeen) {
+      metrics.droneLastSeenAge.set({ drone_id: droneId }, (now - seenAt) / 1000);
+    }
+    res.setHeader('Content-Type', metrics.contentType);
+    res.end(await metrics.expose());
+  } catch (err) {
+    log.error('metrics_scrape_failed', { error: String(err && err.message || err) });
+    res.status(500).end();
+  }
+});
 
 // Connection lifecycle proxies
 app.post('/api/connection/start', async (req, res) => {
@@ -156,28 +231,26 @@ app.post('/api/replay/playback/seek', async (req, res) => {
   }
 });
 
-// ZeroMQ Subscriber logic
-async function runZmqSubscriber() {
-  const sock = new zmq.Subscriber();
-
-  sock.connect(ZMQ_PUB_URL);
-  sock.subscribe(''); // Subscribe to all topics
-
-  console.log(`ZeroMQ Subscriber connected to ${ZMQ_PUB_URL}`);
-
-  try {
-    for await (const [msg] of sock) {
-      // The Python backend sends JSON strings → telemetry core (enrich + broadcast)
-      const payload = msg.toString();
-      telemetryEngine.processZmqFrameString(payload);
-    }
-  } catch (err) {
-    console.error("ZeroMQ Error:", err);
-  }
-}
+// ZeroMQ Subscriber — supervised with reconnect + backoff (Phase 5A, fixes F3).
+// A ZMQ error or clean stream end no longer silently kills telemetry forever;
+// it reconnects with exponential backoff and the state is visible in /readyz +
+// /metrics.
+const zmqSubscriber = new ZmqTelemetrySubscriber({
+  url: ZMQ_PUB_URL,
+  logger: log.child({ subsystem: 'zmq' }),
+  minBackoffMs: config.zmqReconnectMinMs,
+  maxBackoffMs: config.zmqReconnectMaxMs,
+  onConnected: (connected) => health.setZmqConnected(connected),
+  onReconnect: () => { try { metrics.zmqReconnects.inc(); } catch { /* ignore */ } },
+  onFrame: (payload) => {
+    health.recordFrame();
+    try { metrics.zmqFramesReceived.inc(); } catch { /* ignore */ }
+    telemetryEngine.processZmqFrameString(payload);
+  },
+});
 
 // Start ZMQ
-runZmqSubscriber();
+zmqSubscriber.start();
 
 // Telemetry engine (read-only debug)
 app.get('/api/telemetry/engine/snapshot', (req, res) => {
@@ -340,6 +413,72 @@ app.post('/api/command/:cmd', async (req, res) => {
     res.status(400).json({ error: 'Unknown command shortcut' });
   }
 });
+
+// ─── Fleet routes ─────────────────────────────────────────────────────────────
+// Per-drone command shortcut — same COMMAND_MAP, addressed to one fleet drone.
+// Registered BEFORE the generic /api/drones forwarder so it wins the match.
+app.post('/api/drones/:droneId/command/:cmd', async (req, res) => {
+  const cmdStr = req.params.cmd.toLowerCase();
+  if (!COMMAND_MAP[cmdStr]) {
+    return res.status(400).json({ error: 'Unknown command shortcut' });
+  }
+  try {
+    const base = COMMAND_MAP[cmdStr];
+    const payload = {
+      command: base.command,
+      p1: base.p1 ?? 0,
+      p2: base.p2 ?? 0,
+      p3: base.p3 ?? 0,
+      p4: base.p4 ?? 0,
+      p5: base.p5 ?? 0,
+      p6: base.p6 ?? 0,
+      p7: base.p7 ?? 0,
+    };
+    if (cmdStr === 'takeoff' && req.body && req.body.altitude_m != null && !Number.isNaN(Number(req.body.altitude_m))) {
+      payload.p7 = Number(req.body.altitude_m);
+    }
+    const response = await axios.post(
+      `${PYTHON_API_URL}/fleet/drones/${encodeURIComponent(req.params.droneId)}/command`,
+      payload
+    );
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({
+      error: 'Command failed in python backend',
+      details: err.response?.data || err.message,
+    });
+  }
+});
+
+// Generic fleet forwarder: /api/fleet/*  → python /fleet/*
+//                          /api/drones/* → python /fleet/drones/*
+// The Python fleet API mirrors these paths 1:1 (see python_service/fleet/routes.py),
+// so one verbatim forwarder covers registration, connection, state, missions,
+// parameters, and everything Phase 4+ adds — no per-route boilerplate.
+async function forwardToFleet(req, res, pythonPath) {
+  try {
+    const response = await axios.request({
+      method: req.method,
+      url: `${PYTHON_API_URL}${pythonPath}`,
+      data: ['POST', 'PUT', 'PATCH'].includes(req.method) ? (req.body || {}) : undefined,
+      params: req.query,
+      validateStatus: () => true, // pass python's status codes through (404, 409, …)
+    });
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    res.status(502).json({ error: 'Fleet backend unreachable', details: err.message });
+  }
+}
+
+app.all('/api/fleet', (req, res) => forwardToFleet(req, res, '/fleet'));
+app.all('/api/fleet/*', (req, res) =>
+  forwardToFleet(req, res, req.originalUrl.replace(/^\/api\/fleet/, '/fleet').split('?')[0])
+);
+app.all('/api/drones', (req, res) => forwardToFleet(req, res, '/fleet/drones'));
+app.all('/api/drones/*', (req, res) =>
+  forwardToFleet(req, res, req.originalUrl.replace(/^\/api\/drones/, '/fleet/drones').split('?')[0])
+);
 
 app.post('/api/mode', async (req, res) => {
   try {
@@ -950,4 +1089,64 @@ app.post('/api/setup/radio', async (req, res) => {
     const status = err.response?.status || 500;
     res.status(status).json({ error: 'Failed to set radio config', details: err.response?.data || err.message });
   }
+});
+
+// ─── Error handling backstops (Phase 5A) ─────────────────────────────────────
+// 404 for anything unmatched, then a final error middleware so a thrown/rejected
+// handler returns clean JSON (with the correlation id) instead of an HTML stack
+// or a hung socket.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found', path: req.path });
+});
+
+// eslint-disable-next-line no-unused-vars -- Express identifies error middleware by arity (4 args)
+app.use((err, req, res, next) => {
+  const requestId = res.getHeader('x-request-id');
+  log.error('unhandled_route_error', { error: String(err && err.message || err), stack: err && err.stack, request_id: requestId });
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error', request_id: requestId });
+});
+
+// ─── Graceful shutdown + panic recovery (Phase 5A) ───────────────────────────
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  health.markShuttingDown(); // /readyz → 503 so the LB drains us first
+  log.info('shutdown_initiated', { signal });
+
+  const forceTimer = setTimeout(() => {
+    log.error('shutdown_timeout_forcing_exit', { timeout_ms: config.shutdownTimeoutMs });
+    process.exit(1);
+  }, config.shutdownTimeoutMs);
+  forceTimer.unref();
+
+  try {
+    await zmqSubscriber.stop();
+    for (const client of wss.clients) {
+      try { client.close(1001, 'server shutting down'); } catch { /* ignore */ }
+    }
+    await new Promise((resolve) => wss.close(() => resolve()));
+    await new Promise((resolve) => server.close(() => resolve()));
+    log.info('shutdown_complete');
+    clearTimeout(forceTimer);
+    process.exit(0);
+  } catch (err) {
+    log.error('shutdown_error', { error: String(err && err.message || err) });
+    clearTimeout(forceTimer);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Panic recovery: log the crash with full context, then drain and exit so a
+// supervisor (systemd/K8s/compose) restarts us cleanly. Never swallow silently.
+process.on('uncaughtException', (err) => {
+  log.error('uncaught_exception', { error: String(err && err.message || err), stack: err && err.stack });
+  gracefulShutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled_rejection', { reason: String(reason && reason.message || reason), stack: reason && reason.stack });
 });

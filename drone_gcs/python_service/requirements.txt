@@ -6,4 +6,5 @@ pyzmq==25.1.2
 pydantic==2.6.3
 pyserial==3.5
 websockets==16.0
+prometheus-client==0.20.0
 PyGObject==3.56.3
