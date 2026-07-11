@@ -136,6 +136,25 @@ class ParameterSyncManager:
             arr = self._param_waiters.get(key, [])
             self._param_waiters[key] = [f for f in arr if f is not fut and not f.done()]
 
+    async def refresh_param(self, param_id: str, timeout_s: float = 1.0):
+        """Re-read a single parameter by name from the vehicle and update the cache.
+
+        Used after operations that change a param on the FC without an explicit
+        PARAM_SET (e.g. MISSION_CLEAR_ALL zeroes FENCE_TOTAL), so /fence/status
+        reflects reality instead of the stale cached value. Returns the fresh
+        float value, or None on timeout / no connection.
+        """
+        if not self.lm.conn or not self.lm.primary_sysid:
+            return None
+        key = param_id.rstrip("\x00")
+        sysid, compid = self.lm.primary_sysid, self.lm.primary_compid
+        # param_index = -1 tells ArduPilot to look the parameter up by name.
+        self.lm.conn.mav.param_request_read_send(sysid, compid, key.encode("utf-8"), -1)
+        observed = await self._wait_for_param_value(key, timeout_s=timeout_s)
+        if observed is not None:
+            self.parameters[key] = float(observed)
+        return observed
+
     async def set_parameter_verified(self, param_id: str, param_value: float, retries: int = 3, tolerance: float = 1e-5):
         """
         Writes PARAM_SET and verifies by waiting for matching PARAM_VALUE echo.

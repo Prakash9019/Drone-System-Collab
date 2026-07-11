@@ -358,8 +358,24 @@ class LinkManager:
 
     async def read_loop(self):
         try:
-            while self.running and self.conn:
-                msg = self.conn.recv_match(blocking=False)
+            # Loop on self.running only — NOT on self.conn. During a reconnect,
+            # purge_socket() transiently sets self.conn = None before the new
+            # socket is opened. If this loop gated on self.conn it would exit
+            # permanently on that window (reconnect never restarts it), which
+            # stalls PARAM_VALUE routing and freezes last_heartbeat_time,
+            # producing an endless 3s CONNECTED→HEARTBEAT_LOST flap. Instead we
+            # re-read self.conn each iteration so we pick up the new socket.
+            while self.running:
+                conn = self.conn
+                if conn is None:
+                    await asyncio.sleep(0.05)
+                    continue
+                try:
+                    msg = conn.recv_match(blocking=False)
+                except Exception:
+                    # Socket closed mid-reconnect; wait for the new one.
+                    await asyncio.sleep(0.05)
+                    continue
                 if msg:
                     mtype = msg.get_type()
                     self.message_counts[mtype] = self.message_counts.get(mtype, 0) + 1
@@ -479,14 +495,24 @@ class LinkManager:
 
     async def keep_alive_loop(self):
         try:
-            while self.running and self.conn:
+            # Loop on self.running only (see read_loop note): must survive the
+            # brief self.conn == None window during reconnect, otherwise the
+            # loop that DRIVES reconnect dies and the link can never recover.
+            while self.running:
+                conn = self.conn
+                if conn is None:
+                    await asyncio.sleep(0.2)
+                    continue
                 # Send GCS heartbeat at 1Hz
-                self.conn.mav.heartbeat_send(
-                    mavutil.mavlink.MAV_TYPE_GCS,
-                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                    0, 0, 0
-                )
-                
+                try:
+                    conn.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                        0, 0, 0
+                    )
+                except Exception:
+                    pass
+
                 # Check link loss
                 if self.last_heartbeat_time and (time.time() - self.last_heartbeat_time > self.heartbeat_timeout_s):
                     if self.connection_state != ConnectionState.HEARTBEAT_LOST:
@@ -563,6 +589,10 @@ class LinkManager:
 
             self._streams_sent.clear()
             self.request_data_streams()
+            # Defense-in-depth: restart read_loop/keep_alive_loop if either died
+            # during the transport swap. _ensure_background_tasks() prunes done
+            # tasks and re-adds any that are missing.
+            self._ensure_background_tasks()
             self._set_connection_state(ConnectionState.CONNECTED)
             logger.info("Reconnect successful. Streams renegotiated.")
         except Exception as e:

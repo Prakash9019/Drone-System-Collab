@@ -328,16 +328,43 @@ async def fence_status():
             "last_breach_text_ts": v.fence_status.last_breach_text_ts,
             "valid": bool(v.fence_status.valid),
         }
+    # FENCE_TOTAL is the number of polygon fence points actually stored on the
+    # vehicle. It's the ground truth for "is a polygon loaded" — unlike FENCE_TYPE,
+    # whose polygon bit is set by default (7) even when zero points exist.
+    fence_total = int(params.get("FENCE_TOTAL", 0))
+    fence_type = int(params.get("FENCE_TYPE", 7))
     return {
         "enabled": bool(int(params.get("FENCE_ENABLE", 0))),
         "action": int(params.get("FENCE_ACTION", 0)),
-        "fence_type": int(params.get("FENCE_TYPE", 7)),
+        "fence_type": fence_type,
         "radius": float(params.get("FENCE_RADIUS", 0.0)),
         "alt_max": float(params.get("FENCE_ALT_MAX", 0.0)),
         "alt_min": float(params.get("FENCE_ALT_MIN", 0.0)),
         "margin": float(params.get("FENCE_MARGIN", 2.0)),
+        "fence_total": fence_total,
+        # A polygon fence is genuinely present only when the polygon type bit is
+        # set AND at least one point is stored on the vehicle.
+        "polygon_loaded": bool((fence_type & 0x4) and fence_total > 0),
         "fence_status_msg": fs,
     }
+
+@app.post("/fence/clear")
+async def clear_fence():
+    """Erase the polygon fence stored on the vehicle (MISSION_CLEAR_ALL for FENCE),
+    then re-read FENCE_TOTAL so status immediately reflects the empty fence. Lets the
+    operator wipe an old polygon before drawing a fresh one."""
+    if not mission_manager:
+        raise HTTPException(status_code=500, detail="Mission manager not initialized")
+    success = await mission_manager.clear_mission(mission_type="FENCE")
+    if not success:
+        raise HTTPException(status_code=500, detail={
+            "error": "fence_clear_failed",
+            "transfer": mission_manager.transfer_status,
+        })
+    fence_total = None
+    if parameter_manager:
+        fence_total = await parameter_manager.refresh_param("FENCE_TOTAL")
+    return {"status": "success", "fence_total": int(fence_total) if fence_total is not None else None}
 
 class FenceConfigRequest(BaseModel):
     enabled: bool

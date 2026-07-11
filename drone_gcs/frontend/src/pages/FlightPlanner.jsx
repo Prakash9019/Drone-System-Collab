@@ -261,8 +261,14 @@ const FlightPlanner = () => {
 
     const fenceType = Number(fenceStatus?.fence_type ?? fenceForm.fence_type ?? 7);
     const radiusM = Number(fenceStatus?.radius ?? fenceForm.radius ?? 0);
+    // FENCE_TOTAL = polygon points actually stored on the vehicle. Ground truth
+    // for whether a polygon exists — FENCE_TYPE's polygon bit is set by default
+    // (7) even with zero points, which is why "Polygon active" used to read YES
+    // on a fresh vehicle with no polygon drawn.
+    const fenceTotal = Number(fenceStatus?.fence_total ?? 0);
     const circleActive = (fenceType & 0x2) && radiusM > 0;
-    const polygonActive = (fenceType & 0x4) === 0x4;
+    const polygonActive = fenceStatus?.polygon_loaded
+      ?? ((fenceType & 0x4) === 0x4 && fenceTotal > 0);
 
     const fs = fenceStatus?.fence_status_msg;
     return {
@@ -273,6 +279,7 @@ const FlightPlanner = () => {
       vehicleInExcl,
       circleActive: !!circleActive,
       polygonActive,
+      fenceTotal,
       radiusM,
       enabled: !!(fenceStatus?.enabled ?? fenceEnabled),
       action: Number(fenceStatus?.action ?? fenceAction),
@@ -409,6 +416,27 @@ const FlightPlanner = () => {
       setStatusMsg(`${missionType} uploaded successfully!`);
     } catch (err) {
       setStatusMsg(extractErrText(err, 'Failed to upload mission.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ─── Clear the polygon fence stored on the vehicle ───────────────────────
+  // Erases FENCE storage on the FC (FENCE_TOTAL → 0) and clears the on-screen
+  // polygon so both agree, letting the operator draw a fresh fence.
+  const handleClearFence = async () => {
+    if (!window.confirm('Remove the polygon fence stored on the vehicle so you can draw a new one?')) return;
+    setLoading(true);
+    setStatusMsg('Clearing fence from vehicle...');
+    try {
+      const res = await axios.post(`${API_URL}/api/fence/clear`);
+      clearMission();
+      const total = res.data?.fence_total;
+      setStatusMsg(`Fence cleared on vehicle${total != null ? ` (FENCE_TOTAL = ${total})` : ''}. Draw a new polygon and Write.`);
+      const s = await axios.get(`${API_URL}/api/fence/status`);
+      setFenceStatus(s.data);
+    } catch (err) {
+      setStatusMsg(extractErrText(err, 'Failed to clear fence.'));
     } finally {
       setLoading(false);
     }
@@ -880,6 +908,14 @@ const FlightPlanner = () => {
             ))}
           </span>
           <button className="btn-toolbar primary" onClick={applyFenceConfig} disabled={loading || (fenceForm.radius > 0 && fenceForm.margin >= fenceForm.radius)}>Apply Fence Config</button>
+          <button
+            className="btn-toolbar danger"
+            onClick={handleClearFence}
+            disabled={loading}
+            title="Erase the polygon fence stored on the vehicle so you can draw a new one"
+          >
+            <Trash2 size={16} /> Clear Fence
+          </button>
           <span className="status-msg" style={{ opacity: 0.75, fontSize: 11 }}>
             Draw polygon → Write → Enable → set Margin &lt; Radius → Apply Config
           </span>
@@ -908,7 +944,7 @@ const FlightPlanner = () => {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 6, fontSize: 11 }}>
             <Diag label="Enabled" value={fenceDiagnostics.enabled ? 'YES' : 'NO'} good={fenceDiagnostics.enabled} />
-            <Diag label="Polygon active" value={fenceDiagnostics.polygonActive ? 'YES' : 'NO'} good={fenceDiagnostics.polygonActive} />
+            <Diag label="Polygon active" value={fenceDiagnostics.polygonActive ? `YES (${fenceDiagnostics.fenceTotal} pts)` : 'NO'} good={fenceDiagnostics.polygonActive} />
             <Diag label="Circle active" value={fenceDiagnostics.circleActive ? `YES (${Math.round(fenceDiagnostics.radiusM)}m)` : 'NO'} muted />
             <Diag label="Action on breach" value={['Report', 'RTL', 'Land', 'Brake', 'SmartRTL'][fenceDiagnostics.action] || `code ${fenceDiagnostics.action}`} muted />
             <Diag

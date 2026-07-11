@@ -264,6 +264,15 @@ app.post('/api/fence/config', async (req, res) => {
   }
 });
 
+app.post('/api/fence/clear', async (req, res) => {
+  try {
+    const response = await axios.post(`${PYTHON_API_URL}/fence/clear`);
+    res.json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'Failed to clear fence', details: err.message });
+  }
+});
+
 app.get('/api/rally', async (req, res) => {
   try {
     const response = await axios.get(`${PYTHON_API_URL}/rally`);
