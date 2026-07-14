@@ -61,6 +61,28 @@ class Metrics:
             "zmq_publisher_up", "1 when the ZMQ publisher socket is bound and running",
             registry=self.registry,
         )
+        # ── Phase 5B persistence ──────────────────────────────────────────────
+        self.telemetry_persist_written = Counter(
+            "telemetry_persist_written_total", "1 Hz telemetry rows written to the DB",
+            registry=self.registry,
+        )
+        self.telemetry_persist_dropped = Counter(
+            "telemetry_persist_dropped_total",
+            "telemetry samples dropped because the writer queue was full (drop-oldest)",
+            registry=self.registry,
+        )
+        self.telemetry_persist_queue_depth = Gauge(
+            "telemetry_persist_queue_depth", "current depth of the telemetry writer queue",
+            registry=self.registry,
+        )
+        self.retention_rows_pruned = Counter(
+            "retention_rows_pruned_total", "rows pruned by the retention manager",
+            ["table"], registry=self.registry,
+        )
+        self.retention_last_run_at = Gauge(
+            "retention_last_run_at", "epoch seconds of the last retention sweep",
+            registry=self.registry,
+        )
 
     def expose(self) -> bytes:
         return generate_latest(self.registry)

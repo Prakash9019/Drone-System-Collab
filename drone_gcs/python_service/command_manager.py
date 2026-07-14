@@ -2,9 +2,23 @@ import asyncio
 import time
 import logging
 from pymavlink import mavutil
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Phase 5B: process-wide command-audit sink. Set when persistence is enabled;
+# every CommandManager (existing and future sessions) consults it, so audit is
+# uniform across legacy, fleet, and hardcoded-MAV_CMD routes. Dark by default.
+_audit_sink: Optional[Callable[[dict], "asyncio.Future"]] = None
+
+
+def set_audit_sink(sink: Optional[Callable[[dict], Any]]) -> None:
+    global _audit_sink
+    _audit_sink = sink
+
+
+def get_audit_sink() -> Optional[Callable[[dict], Any]]:
+    return _audit_sink
 
 def mav_result_text(result: int) -> str:
     names = {
@@ -32,10 +46,14 @@ class CommandManager:
         # Stores the current ACK result for a given command.
         # Key: f"{sysid}_{compid}_{command}"
         self._pending_acks: Dict[str, Optional[Dict[str, Any]]] = {}
-        
+
         # State tracking for the frontend/event bus
         # Maps vehicle ID (sysid) to its active command state
         self._active_commands: Dict[int, Dict[str, Any]] = {}
+
+        # Phase 5B: the owning drone's id, set by DroneSession so the audit hook
+        # can attribute each command. None in pure single-drone/legacy paths.
+        self.drone_id: Optional[str] = None
 
     def _get_lock(self, sysid: int, compid: int) -> asyncio.Lock:
         key = f"{sysid}_{compid}"
@@ -73,12 +91,52 @@ class CommandManager:
             }
 
     async def execute_command(
-        self, 
-        sysid: int, 
-        compid: int, 
-        command: int, 
-        p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, 
-        is_int=False, 
+        self,
+        sysid: int,
+        compid: int,
+        command: int,
+        p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0,
+        is_int=False,
+        frame=0,
+        retries=3,
+        source_route: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a command and audit its outcome (Phase 5B).
+
+        Thin wrapper over the unchanged core so every return path — no-connection,
+        accepted/rejected, timeout — writes exactly one audit row when a sink is
+        registered. Auditing never affects the command result or raises into the
+        caller.
+        """
+        result = await self._execute_command_core(
+            sysid, compid, command, p1, p2, p3, p4, p5, p6, p7, is_int, frame, retries,
+        )
+        sink = get_audit_sink()
+        if sink is not None:
+            try:
+                await sink({
+                    "drone_id": self.drone_id,
+                    "sysid": int(sysid),
+                    "command": int(command),
+                    "params": {"p1": p1, "p2": p2, "p3": p3, "p4": p4,
+                               "p5": p5, "p6": p6, "p7": p7, "frame": frame, "is_int": is_int},
+                    "result": result.get("mav_result"),
+                    "result_text": result.get("mav_result_text"),
+                    "reason": result.get("reason"),
+                    "source_route": source_route,
+                    "issued_at": time.time(),
+                })
+            except Exception:
+                logger.exception("command audit sink failed (command=%s)", command)
+        return result
+
+    async def _execute_command_core(
+        self,
+        sysid: int,
+        compid: int,
+        command: int,
+        p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0,
+        is_int=False,
         frame=0,
         retries=3
     ) -> Dict[str, Any]:

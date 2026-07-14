@@ -8,3 +8,8 @@ pyserial==3.5
 websockets==16.0
 prometheus-client==0.20.0
 PyGObject==3.56.3
+SQLAlchemy[asyncio]==2.0.51
+alembic==1.14.1
+aiosqlite==0.22.1
+# Postgres (opt-in, scale/regulatory deployments): pip install asyncpg psycopg2-binary
+# S3/MinIO object store (opt-in): pip install boto3

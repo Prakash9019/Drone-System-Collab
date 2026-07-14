@@ -577,7 +577,8 @@ class LinkManager:
         self, sysid: int, compid: int, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, retries=3
     ) -> Dict[str, Any]:
         return await self.command_manager.execute_command(
-            sysid, compid, command, p1, p2, p3, p4, p5, p6, p7, is_int=False, retries=retries
+            sysid, compid, command, p1, p2, p3, p4, p5, p6, p7, is_int=False, retries=retries,
+            source_route="command",
         )
 
     def list_flight_modes(self) -> List[str]:
@@ -649,6 +650,7 @@ class LinkManager:
             mavutil.mavlink.MAV_CMD_DO_SET_HOME,
             0, 0, 0, 0,
             float(lat), float(lng), float(alt),
+            source_route="set_home",
         )
 
     async def set_roi_location(self, sysid: int, compid: int, lat: float, lng: float, alt: float) -> Dict[str, Any]:
@@ -666,6 +668,7 @@ class LinkManager:
             mavutil.mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
             0, 0, 0, 0,
             float(lat), float(lng), float(alt),
+            source_route="set_roi",
         )
 
     async def clear_roi(self, sysid: int, compid: int) -> Dict[str, Any]:
@@ -689,6 +692,7 @@ class LinkManager:
             0,
             0,
             0,
+            source_route="clear_roi",
         )
 
     def fetch_parameters(self, sysid: int, compid: int):

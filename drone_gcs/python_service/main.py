@@ -75,6 +75,15 @@ metrics = get_metrics()
 session_registry: SessionRegistry | None = None
 default_session = None
 
+# Phase 5B persistence — stays None (fully dark) unless FLEET_PERSISTENCE_ENABLED.
+db_settings = None
+repo_hub = None
+flight_tracker = None
+persistence_sampler = None
+telemetry_writer = None
+retention_manager = None
+DEFAULT_ORG_ID = "default"          # pre-5C: single org boundary
+
 link_manager = None
 mission_manager = None
 telemetry_publisher = None
@@ -153,6 +162,75 @@ async def lifespan(app: FastAPI):
     preflight_manager = default_session.preflight_manager
     camera_manager = default_session.camera_manager
 
+    # ── Phase 5B persistence (dark unless FLEET_PERSISTENCE_ENABLED) ──────────
+    global db_settings, repo_hub, flight_tracker, persistence_sampler
+    global telemetry_writer, retention_manager
+    from db.settings import load_db_settings
+    db_settings = load_db_settings()
+    if db_settings.persistence_enabled:
+        try:
+            from db.bootstrap import bootstrap_persistence
+            repo_hub = await bootstrap_persistence(db_settings)
+            fleet_routes.set_repositories(repo_hub, org_id=DEFAULT_ORG_ID)  # "default" org (pre-5C)
+            # The migration seeds the default drone row; mirror the actual runtime
+            # config onto it so a restart rehydrates with the real connection string.
+            await repo_hub.drones.upsert(
+                drone_id=DEFAULT_DRONE_ID, name=service_config.drone_name,
+                connection_string=connection_string, baudrate=baudrate,
+                udp_forwarding=udp_endpoints or None, created_at=default_session.created_at,
+            )
+            drone_rows = await repo_hub.drones.list_for_rehydrate()
+            await session_registry.load_from_db(repo_hub.drones)
+            reconnect_ids = [i for i in session_registry.auto_connect_ids(drone_rows)
+                             if i != DEFAULT_DRONE_ID]
+            for did in reconnect_ids:
+                sess = session_registry.get(did)
+                if sess is not None:
+                    asyncio.create_task(sess.connect())  # staggered by per-session backoff
+
+            # Flight detector + low-rate persistence sampler (off the ZMQ loop).
+            from db.services.flight_tracker import FlightTracker
+            from db.services.persistence_sampler import PersistenceSampler
+            closed = await repo_hub.flights.close_stale_inflight()  # no flight left dangling across restart
+            if closed:
+                logger.info("Closed %d stale in-flight record(s) at boot", closed)
+            flight_tracker = FlightTracker(repo_hub.flights, org_id=DEFAULT_ORG_ID)
+            fleet_routes.set_flight_tracker(flight_tracker)
+
+            # 1 Hz (per-org configurable) telemetry persistence — bounded async
+            # writer off the real-time path; retention resolved per org.
+            from db.services.org_settings_resolver import OrgSettingsResolver
+            from db.services.retention_manager import RetentionManager
+            from db.services.telemetry_writer import TelemetryWriter
+            resolver = OrgSettingsResolver(repo_hub.org, db_settings)
+            fleet_routes.set_org_resolver(resolver)
+            telemetry_writer = TelemetryWriter(
+                repo_hub.telemetry, queue_max=db_settings.persist_queue_max, metrics=metrics,
+            )
+            telemetry_writer.start()
+            # Poll fast enough to honour the highest per-org persist rate; the
+            # sampler gates each drone's writes to its org's resolved rate.
+            persistence_sampler = PersistenceSampler(
+                session_registry, repo_hub, flight_tracker,
+                org_id=DEFAULT_ORG_ID, sample_hz=max(1.0, db_settings.telemetry_persist_hz),
+                telemetry_writer=telemetry_writer, resolver=resolver,
+            )
+            persistence_sampler.start()
+            retention_manager = RetentionManager(repo_hub, resolver, metrics=metrics)
+            retention_manager.start()
+
+            # Command audit — one row per command on every route (M6).
+            from command_manager import set_audit_sink
+            from db.services.command_audit import build_command_audit_sink
+            set_audit_sink(build_command_audit_sink(
+                repo_hub.commands, org_id=DEFAULT_ORG_ID, flight_tracker=flight_tracker))
+
+            logger.info("Persistence enabled: rehydrated fleet from DB",
+                        extra={"reconnect_count": len(reconnect_ids)})
+        except Exception:
+            logger.exception("Persistence bootstrap failed — continuing RAM-only")
+            repo_hub = None
+
     sitl_manager = SITLManager()
     osd_manager = OSDProfileManager()
 
@@ -192,6 +270,35 @@ async def lifespan(app: FastAPI):
         await get_video_manager().shutdown()
     except Exception:
         logger.exception("video manager shutdown failed")
+
+    if repo_hub is not None:
+        try:
+            from command_manager import set_audit_sink
+            set_audit_sink(None)               # stop auditing before tearing down the DB
+        except Exception:
+            logger.exception("clearing command audit sink failed")
+    if retention_manager is not None:
+        try:
+            await retention_manager.stop()
+        except Exception:
+            logger.exception("retention manager stop failed")
+    if persistence_sampler is not None:
+        try:
+            await persistence_sampler.stop()   # also closes open flights (end_reason=shutdown)
+        except Exception:
+            logger.exception("persistence sampler stop failed")
+    if telemetry_writer is not None:
+        try:
+            await telemetry_writer.stop()      # best-effort final flush
+        except Exception:
+            logger.exception("telemetry writer stop failed")
+
+    if repo_hub is not None:
+        try:
+            from db.base import dispose_engine
+            await dispose_engine()
+        except Exception:
+            logger.exception("DB engine dispose failed")
 
     await asyncio.gather(*tasks, return_exceptions=True)
 

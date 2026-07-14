@@ -1,0 +1,8 @@
+
+# Phase 5B: default SQLite DB + WAL sidecars (never commit runtime data)
+fleet.db
+fleet.db-wal
+fleet.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

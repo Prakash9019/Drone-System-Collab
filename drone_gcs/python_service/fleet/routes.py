@@ -21,11 +21,46 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fleet", tags=["fleet"])
 
 _registry: Optional[SessionRegistry] = None
+_repos = None                       # RepositoryHub | None — set only when persistence is enabled
+_flight_tracker = None              # FlightTracker | None
+_org_resolver = None                # OrgSettingsResolver | None
+_org_id: str = "default"            # pre-5C: every drone lives in the default org
 
 
 def set_registry(registry: SessionRegistry) -> None:
     global _registry
     _registry = registry
+
+
+def set_flight_tracker(tracker) -> None:
+    global _flight_tracker
+    _flight_tracker = tracker
+
+
+def set_org_resolver(resolver) -> None:
+    global _org_resolver
+    _org_resolver = resolver
+
+
+def set_repositories(repos, *, org_id: str = "default") -> None:
+    """Enable DB write-through for registration/deregistration. When unset
+    (persistence off), routes behave exactly as before — RAM only."""
+    global _repos, _org_id
+    _repos = repos
+    _org_id = org_id
+
+
+def _require_repos():
+    if _repos is None:
+        raise HTTPException(status_code=503, detail="Persistence layer is disabled (FLEET_PERSISTENCE_ENABLED)")
+    return _repos
+
+
+def _infer_kind(connection_string: str) -> str:
+    """Map a mavutil connection string to a profile 'kind' label."""
+    from db.repositories.allowlist_repo import parse_connection_string
+    scheme, _host, _port, _dev = parse_connection_string(connection_string)
+    return {"tcp": "tcp", "udp": "udp", "serial": "serial"}.get(scheme, "udp")
 
 
 def _require_session(drone_id: str) -> DroneSession:
@@ -96,6 +131,14 @@ async def list_drones():
 async def register_drone(req: DroneRegistration):
     if _registry is None:
         raise HTTPException(status_code=500, detail="Fleet registry not initialized")
+    if _repos is not None:
+        allowed = await _repos.allowlist.is_allowed(req.connection_string, org_id=_org_id,
+                                                    baudrate=req.baudrate)
+        if not allowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"connection_string not permitted by allow-list: {req.connection_string!r}",
+            )
     try:
         session = _registry.create(
             drone_id=req.drone_id,
@@ -107,6 +150,37 @@ async def register_drone(req: DroneRegistration):
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # DB is the source of truth (ADR-001): persist, then keep RAM as the cache.
+    # If persistence fails, roll back the RAM session so the two never diverge.
+    if _repos is not None:
+        try:
+            await _repos.drones.upsert(
+                drone_id=session.drone_id,
+                name=session.name,
+                org_id=_org_id,
+                connection_string=req.connection_string,
+                baudrate=req.baudrate,
+                udp_forwarding=req.udp_forwarding_endpoints or None,
+                auto_connect=req.auto_connect,
+                metadata=req.metadata or None,
+                created_at=session.created_at,
+            )
+            # Every drone owns at least one connection profile mirroring its
+            # registration transport (improvement 1); the active one mirrors
+            # back onto drones.connection_string.
+            if await _repos.connection_profiles.get_active(session.drone_id) is None:
+                await _repos.connection_profiles.add(
+                    drone_id=session.drone_id, org_id=_org_id, name="default",
+                    kind=_infer_kind(req.connection_string),
+                    connection_string=req.connection_string, baudrate=req.baudrate,
+                    udp_forwarding=req.udp_forwarding_endpoints or None, activate=True,
+                )
+        except Exception as e:  # noqa: BLE001
+            await _registry.remove(session.drone_id)
+            logger.exception("register_drone: DB persist failed, rolled back RAM session")
+            raise HTTPException(status_code=500, detail=f"failed to persist drone: {e}")
+
     if req.auto_connect:
         await session.connect()
     return session.to_summary()
@@ -122,6 +196,12 @@ async def deregister_drone(drone_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     if not removed:
         raise HTTPException(status_code=404, detail=f"Unknown drone_id: {drone_id}")
+    # Soft-delete in the DB so the drone doesn't rehydrate on the next restart.
+    if _repos is not None:
+        try:
+            await _repos.drones.archive(drone_id)
+        except Exception:
+            logger.exception("deregister_drone: DB archive failed for %s", drone_id)
     return {"status": "removed", "drone_id": drone_id}
 
 
@@ -278,3 +358,273 @@ async def drone_parameters_set(drone_id: str, req: ParameterSetRequest):
         "error": result.get("error", "Set parameter failed"),
         "rolled_back": result.get("rolled_back", False),
     })
+
+
+# ── per-drone: connection profiles (improvement 1) ───────────────────────────
+class ConnectionProfileCreate(BaseModel):
+    name: str
+    kind: str                                   # udp|tcp|serial|lte|wireguard|companion|sitl
+    connection_string: str
+    baudrate: int | None = None
+    udp_forwarding: list[str] = []
+    priority: int = 100
+    metadata: dict = {}
+    activate: bool = False
+
+
+@router.get("/drones/{drone_id}/connection-profiles")
+async def list_connection_profiles(drone_id: str):
+    _require_session(drone_id)                   # 404 if the drone isn't registered
+    repos = _require_repos()
+    return {"profiles": await repos.connection_profiles.list(drone_id)}
+
+
+@router.post("/drones/{drone_id}/connection-profiles", status_code=201)
+async def add_connection_profile(drone_id: str, req: ConnectionProfileCreate):
+    _require_session(drone_id)
+    repos = _require_repos()
+    if not await repos.allowlist.is_allowed(req.connection_string, org_id=_org_id, baudrate=req.baudrate):
+        raise HTTPException(status_code=422,
+                            detail=f"connection_string not permitted by allow-list: {req.connection_string!r}")
+    try:
+        return await repos.connection_profiles.add(
+            drone_id=drone_id, org_id=_org_id, name=req.name, kind=req.kind,
+            connection_string=req.connection_string, baudrate=req.baudrate,
+            udp_forwarding=req.udp_forwarding or None, priority=req.priority,
+            metadata=req.metadata or None, activate=req.activate,
+        )
+    except Exception as e:  # noqa: BLE001 — likely a UNIQUE(drone_id, name) clash
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/drones/{drone_id}/connection-profiles/{profile_id}/activate")
+async def activate_connection_profile(drone_id: str, profile_id: str):
+    _require_session(drone_id)
+    repos = _require_repos()
+    profile = await repos.connection_profiles.activate(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Unknown profile_id: {profile_id}")
+    return profile
+
+
+@router.delete("/drones/{drone_id}/connection-profiles/{profile_id}")
+async def delete_connection_profile(drone_id: str, profile_id: str):
+    _require_session(drone_id)
+    repos = _require_repos()
+    if not await repos.connection_profiles.delete(profile_id):
+        raise HTTPException(status_code=404, detail=f"Unknown profile_id: {profile_id}")
+    return {"status": "removed", "profile_id": profile_id}
+
+
+# ── per-drone: capabilities (improvement 2) ──────────────────────────────────
+class CapabilitySet(BaseModel):
+    capability: str                              # rgb_camera|thermal_camera|rtk|payload|...
+    present: bool = True
+    spec: dict = {}
+
+
+@router.get("/drones/{drone_id}/capabilities")
+async def list_capabilities(drone_id: str):
+    _require_session(drone_id)
+    repos = _require_repos()
+    return {"capabilities": await repos.capabilities.list(drone_id)}
+
+
+@router.put("/drones/{drone_id}/capabilities")
+async def set_capability(drone_id: str, req: CapabilitySet):
+    _require_session(drone_id)
+    repos = _require_repos()
+    return await repos.capabilities.set(
+        drone_id=drone_id, capability=req.capability, present=req.present, spec=req.spec or None,
+    )
+
+
+@router.delete("/drones/{drone_id}/capabilities/{capability}")
+async def remove_capability(drone_id: str, capability: str):
+    _require_session(drone_id)
+    repos = _require_repos()
+    if not await repos.capabilities.remove(drone_id=drone_id, capability=capability):
+        raise HTTPException(status_code=404, detail=f"Capability not set: {capability}")
+    return {"status": "removed", "capability": capability}
+
+
+# ── per-drone: flight history (M4) ───────────────────────────────────────────
+@router.get("/drones/{drone_id}/flights")
+async def list_flights(drone_id: str, limit: int = 50):
+    _require_session(drone_id)
+    repos = _require_repos()
+    flights = await repos.flights.list_for_drone(drone_id, limit=min(max(1, limit), 200))
+    active = _flight_tracker.active_flight_id(drone_id) if _flight_tracker else None
+    return {"flights": flights, "active_flight_id": active}
+
+
+# ── per-drone: telemetry history track (M5) ──────────────────────────────────
+@router.get("/drones/{drone_id}/telemetry/track")
+async def telemetry_track(drone_id: str, t0: float | None = None, t1: float | None = None,
+                          limit: int = 5000):
+    _require_session(drone_id)
+    repos = _require_repos()
+    rows = await repos.telemetry.query_track(drone_id, t0=t0, t1=t1, limit=min(max(1, limit), 50000))
+    return {"drone_id": drone_id, "count": len(rows), "track": rows}
+
+
+# ── org settings & feature flags (improvements 4/5/6) ────────────────────────
+class OrgSettingsUpdate(BaseModel):
+    telemetry_persist_hz: float | None = None
+    retention_telemetry_days: int | None = None
+    retention_alerts_days: int | None = None
+    retention_commands_days: int | None = None
+    retention_recordings_days: int | None = None
+    retention_logs_days: int | None = None
+
+
+class FeatureFlagSet(BaseModel):
+    flag: str
+    enabled: bool = True
+    value: dict = {}
+
+
+@router.get("/org/settings")
+async def get_org_settings():
+    repos = _require_repos()
+    settings = await repos.org.get_settings(_org_id)
+    return {"org_id": _org_id, "settings": settings}
+
+
+@router.put("/org/settings")
+async def update_org_settings(req: OrgSettingsUpdate):
+    repos = _require_repos()
+    values = {k: v for k, v in req.model_dump().items() if v is not None}
+    settings = await repos.org.upsert_settings(_org_id, **values)
+    if _org_resolver is not None:
+        _org_resolver.invalidate(_org_id)      # per-org rate/retention take effect promptly
+    return {"org_id": _org_id, "settings": settings}
+
+
+@router.get("/org/feature-flags")
+async def list_feature_flags():
+    repos = _require_repos()
+    return {"org_id": _org_id, "flags": await repos.org.list_flags(_org_id)}
+
+
+@router.put("/org/feature-flags")
+async def set_feature_flag(req: FeatureFlagSet):
+    repos = _require_repos()
+    return await repos.org.set_flag(org_id=_org_id, flag=req.flag, enabled=req.enabled,
+                                    value=req.value or None)
+
+
+# ── per-drone: command audit history (M6) ────────────────────────────────────
+@router.get("/drones/{drone_id}/commands")
+async def list_command_audit(drone_id: str, limit: int = 100):
+    _require_session(drone_id)
+    repos = _require_repos()
+    return {"commands": await repos.commands.list_for_drone(drone_id, limit=min(max(1, limit), 500))}
+
+
+# ── mission templates / instances / runs (improvement 3) ─────────────────────
+class MissionTemplateCreate(BaseModel):
+    name: str
+    definition: dict
+    description: str | None = None
+    version: int = 1
+
+
+class MissionInstanceCreate(BaseModel):
+    name: str
+    template_id: str | None = None
+    drone_id: str | None = None
+    params: dict = {}
+    status: str = "draft"
+
+
+@router.get("/missions/templates")
+async def list_mission_templates(include_archived: bool = False):
+    repos = _require_repos()
+    return {"templates": await repos.missions.list_templates(_org_id, include_archived=include_archived)}
+
+
+@router.post("/missions/templates", status_code=201)
+async def create_mission_template(req: MissionTemplateCreate):
+    repos = _require_repos()
+    return await repos.missions.create_template(
+        org_id=_org_id, name=req.name, definition=req.definition,
+        description=req.description, version=req.version,
+    )
+
+
+@router.delete("/missions/templates/{template_id}")
+async def archive_mission_template(template_id: str):
+    repos = _require_repos()
+    if not await repos.missions.archive_template(template_id):
+        raise HTTPException(status_code=404, detail=f"Unknown template_id: {template_id}")
+    return {"status": "archived", "template_id": template_id}
+
+
+@router.get("/missions/instances")
+async def list_mission_instances(drone_id: str | None = None):
+    repos = _require_repos()
+    return {"instances": await repos.missions.list_instances(_org_id, drone_id=drone_id)}
+
+
+@router.post("/missions/instances", status_code=201)
+async def create_mission_instance(req: MissionInstanceCreate):
+    repos = _require_repos()
+    return await repos.missions.create_instance(
+        org_id=_org_id, name=req.name, template_id=req.template_id,
+        drone_id=req.drone_id, params=req.params or None, status=req.status,
+    )
+
+
+@router.get("/drones/{drone_id}/missions/runs")
+async def list_mission_runs(drone_id: str, limit: int = 50):
+    _require_session(drone_id)
+    repos = _require_repos()
+    return {"runs": await repos.missions.list_runs(drone_id=drone_id, limit=min(max(1, limit), 200))}
+
+
+# ── alert rules (config; firing is Phase 8) ──────────────────────────────────
+class AlertRuleCreate(BaseModel):
+    name: str
+    metric: str
+    operator: str
+    threshold: float | None = None
+    severity: str = "warning"
+    enabled: bool = True
+
+
+@router.get("/alert-rules")
+async def list_alert_rules():
+    repos = _require_repos()
+    return {"rules": await repos.alerts.list_rules(_org_id)}
+
+
+@router.post("/alert-rules", status_code=201)
+async def create_alert_rule(req: AlertRuleCreate):
+    repos = _require_repos()
+    return await repos.alerts.create_rule(
+        org_id=_org_id, name=req.name, metric=req.metric, operator=req.operator,
+        threshold=req.threshold, severity=req.severity, enabled=req.enabled,
+    )
+
+
+@router.delete("/alert-rules/{rule_id}")
+async def delete_alert_rule(rule_id: str):
+    repos = _require_repos()
+    if not await repos.alerts.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail=f"Unknown rule_id: {rule_id}")
+    return {"status": "removed", "rule_id": rule_id}
+
+
+@router.get("/alerts")
+async def list_active_alerts():
+    repos = _require_repos()
+    return {"alerts": await repos.alerts.list_active(_org_id)}
+
+
+# ── recordings metadata (object-store pointers) ──────────────────────────────
+@router.get("/recordings")
+async def list_recordings(drone_id: str | None = None, limit: int = 100):
+    repos = _require_repos()
+    return {"recordings": await repos.recordings.list(org_id=_org_id, drone_id=drone_id,
+                                                      limit=min(max(1, limit), 500))}

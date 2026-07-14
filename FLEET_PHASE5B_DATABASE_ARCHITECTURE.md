@@ -338,6 +338,147 @@ Alembic's version table (auto-managed). One row: current head revision.
 
 ---
 
+## 4A. Final architectural improvements (approved additions to the 5B set)
+
+Six models added before implementation so the schema supports multi-transport drones, hardware capability description, reusable missions, and per-organization operational policy **without a future migration redesign**. All are additive, org- or drone-scoped, and behind the same `FLEET_PERSISTENCE_ENABLED` rollout flag as the rest of 5B.
+
+### 4A.1 `connection_profiles` — per-drone multi-transport (improvement 1)
+A drone owns **many** transport configurations (bench serial today, LTE `udpout` in the field, a WireGuard TCP tunnel next week); exactly one is active. Supersedes the single `drones.connection_string` column, which becomes a **cached mirror** of the active profile (kept for backward compatibility — legacy code that reads `drones.connection_string` still works).
+```sql
+CREATE TABLE connection_profiles (
+  id                TEXT PRIMARY KEY,               -- uuid4 hex
+  drone_id          TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
+  org_id            TEXT NOT NULL REFERENCES organizations(id),
+  name              TEXT NOT NULL,                  -- 'bench-usb', 'field-lte', 'wg-tunnel'
+  kind              TEXT NOT NULL,                  -- udp|tcp|serial|lte|wireguard|companion|sitl
+  connection_string TEXT NOT NULL,                  -- mavutil string; validated vs connection_allowlist
+  baudrate          INTEGER,                        -- serial only
+  udp_forwarding    JSON,
+  priority          INTEGER NOT NULL DEFAULT 100,   -- lower = preferred for auto-failover (future)
+  is_active         INTEGER NOT NULL DEFAULT 0,     -- exactly one active per drone (repo-enforced)
+  metadata          JSON,
+  created_at        DOUBLE NOT NULL,
+  UNIQUE(drone_id, name)
+);
+```
+- Every `connection_string` here is validated against `connection_allowlist` (§4.11) on insert/activate — same F2 gate, now applied per profile.
+- Repo invariant: activating a profile deactivates the drone's others and updates `drones.connection_string`/`baudrate` to mirror it. **The existing `DroneSession` is unchanged** — it still receives one connection string at connect time; the profile layer just chooses which one.
+- Backfill (revision 0001): each existing `drones` row gets one `default` profile mirroring its current `connection_string`, `is_active=1`.
+
+### 4A.2 `drone_capabilities` — installed hardware / supported features (improvement 2)
+Describes what a drone physically has and can do, so the dashboard/analytics can filter ("show thermal-equipped drones") without probing the vehicle.
+```sql
+CREATE TABLE drone_capabilities (
+  id          TEXT PRIMARY KEY,
+  drone_id    TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
+  capability  TEXT NOT NULL,                        -- rgb_camera|thermal_camera|rtk|payload|ai|
+                                                    -- spotlight|loudspeaker|dock_compatible|...
+  present     INTEGER NOT NULL DEFAULT 1,
+  spec        JSON,                                 -- {resolution, fov, model, sensor_id, ...}
+  created_at  DOUBLE NOT NULL,
+  updated_at  DOUBLE,
+  UNIQUE(drone_id, capability)
+);
+```
+- Open vocabulary (a `TEXT` capability key, not an enum column) precisely so a new capability is a data row, not a migration — the same "capability is data, not protocol" principle as `parameter_metadata.py` (master §3.1).
+
+### 4A.3 Missions: `mission_templates` / `mission_instances` / `mission_runs` (improvement 3)
+Separates the **reusable definition** from a **bound instance** from the **execution-history record** — three distinct lifecycles. `flights` (§4.5) remains the arm→disarm regulatory record; a `mission_run` links a flight to the mission it was executing (nullable — not every flight runs a stored mission).
+```sql
+CREATE TABLE mission_templates (            -- reusable definition, org-scoped, drone-agnostic
+  id            TEXT PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES organizations(id),
+  name          TEXT NOT NULL,
+  description   TEXT,
+  version       INTEGER NOT NULL DEFAULT 1,
+  definition    JSON NOT NULL,                      -- waypoints/fence/rally/survey params (MAVLink items)
+  created_by    TEXT REFERENCES users(id),
+  created_at    DOUBLE NOT NULL,
+  archived_at   DOUBLE,
+  UNIQUE(org_id, name, version)
+);
+CREATE TABLE mission_instances (            -- a template bound to a drone + concrete params, ready to run
+  id            TEXT PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES organizations(id),
+  template_id   TEXT REFERENCES mission_templates(id),   -- nullable: an ad-hoc instance has no template
+  drone_id      TEXT REFERENCES drones(id),
+  name          TEXT NOT NULL,
+  params        JSON,                                -- overrides/bindings applied to the template
+  status        TEXT NOT NULL DEFAULT 'draft',       -- draft|ready|uploaded|archived
+  created_by    TEXT REFERENCES users(id),
+  created_at    DOUBLE NOT NULL,
+  archived_at   DOUBLE
+);
+CREATE TABLE mission_runs (                 -- execution-history record (one per attempted execution)
+  id            TEXT PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES organizations(id),
+  instance_id   TEXT REFERENCES mission_instances(id),
+  template_id   TEXT REFERENCES mission_templates(id),   -- denormalized for history even if instance deleted
+  drone_id      TEXT NOT NULL REFERENCES drones(id),
+  flight_id     TEXT REFERENCES flights(id),          -- links execution to the arm→disarm session
+  started_at    DOUBLE NOT NULL,
+  ended_at      DOUBLE,
+  outcome       TEXT,                                 -- completed|aborted|rtl|failed|partial
+  progress      JSON,                                 -- {reached_seq, total, distance_m, ...}
+  created_at    DOUBLE NOT NULL
+);
+```
+- 5B ships schema + thin repos (CRUD + history append). Mission-template **execution** (pushing a template through the existing MAVLink mission microprotocol) is wired to the unchanged `mission_manager.py` in a later phase — no protocol change here.
+
+### 4A.4 `org_settings` — per-org telemetry frequency & retention (improvements 4 & 5)
+One row per org (1:1). Dethrones the hardcoded 1 Hz persistence (D3) and the global retention constants (D4): both become **per-org policy**, with the env-var/global value as the fallback when a column is `NULL`.
+```sql
+CREATE TABLE org_settings (
+  org_id                     TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+  telemetry_persist_hz       DOUBLE,               -- improvement 4; NULL → global TELEMETRY_PERSIST_HZ
+  retention_telemetry_days   INTEGER,              -- improvement 5; NULL → RETENTION_TELEMETRY_DAYS
+  retention_alerts_days      INTEGER,              -- NULL → RETENTION_ALERTS_DAYS
+  retention_commands_days    INTEGER,              -- NULL → RETENTION_COMMANDS_DAYS
+  retention_recordings_days  INTEGER,              -- NULL → RETENTION_RECORDINGS_DAYS
+  retention_logs_days        INTEGER,              -- NULL → RETENTION_LOGS_DAYS
+  updated_at                 DOUBLE
+);
+```
+- The 1 Hz sampler (§8) reads the owning drone's org `telemetry_persist_hz` (cached, refreshed periodically) to decide its per-drone sample interval; absent a row it uses the global default. This is why persistence frequency is no longer "hardcoded 1 Hz" — it is a resolved policy: `org_settings.telemetry_persist_hz ?? env TELEMETRY_PERSIST_HZ (default 1.0)`.
+- `RetentionManager` (§5.3) resolves each window the same way: per-org column, else env default. `flights` stays indefinite (retention_hold-exempt); `retention_logs_days` governs exported/log-file object-store rows.
+
+### 4A.5 `organization_feature_flags` — product tiers without schema redesign (improvement 6)
+```sql
+CREATE TABLE organization_feature_flags (
+  id          TEXT PRIMARY KEY,
+  org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  flag        TEXT NOT NULL,                        -- 'video_wall'|'analytics'|'edge_agent'|'ai'|...
+  enabled     INTEGER NOT NULL DEFAULT 0,
+  value       JSON,                                 -- optional tier params (quotas, limits)
+  updated_at  DOUBLE,
+  UNIQUE(org_id, flag)
+);
+```
+- A tier/entitlement is a row, not a column — new tiers (or per-org overrides for A/B rollout) need zero migration. Read-side only in 5B; enforcement points land with the features they gate (5C+).
+
+### 4A.6 Delete behavior for the additions
+| Parent | Child | Card. | On delete |
+|---|---|---|---|
+| drones | connection_profiles | 1:N | CASCADE |
+| drones | drone_capabilities | 1:N | CASCADE |
+| organizations | org_settings | 1:1 | CASCADE |
+| organizations | organization_feature_flags | 1:N | CASCADE |
+| organizations | mission_templates, mission_instances, mission_runs | 1:N | RESTRICT (history/regulatory) |
+| mission_templates | mission_instances | 1:N | SET NULL (instance survives template edit) |
+| mission_instances | mission_runs | 1:N | SET NULL (run history survives instance deletion) |
+| flights | mission_runs | 1:N | SET NULL |
+
+### 4A.7 Additional indexes
+| Table | Index | Serves |
+|---|---|---|
+| connection_profiles | `(drone_id)`, partial `WHERE is_active=1` | active-profile lookup, rehydration |
+| drone_capabilities | `(drone_id)`, `(capability)` | capability filter ("all thermal drones") |
+| mission_templates | `(org_id, name)` | template picker |
+| mission_runs | `(drone_id, started_at DESC)`, `(flight_id)` | mission history, flight↔mission join |
+| organization_feature_flags | `(org_id)` | flag resolution at request time |
+
+---
+
 ## 5. Indexing, partitioning & retention
 
 ### 5.1 Indexes
@@ -465,6 +606,6 @@ Only the repository layer imports SQLAlchemy. Domain code (registry, publisher, 
 | D6 | Object store: fs default + S3 driver, DB = pointers? | Yes | §9 |
 | — | Leave `osd/sitl/video` JSON configs as files (out of 5B scope)? | Yes | §10.3 |
 
-**On approval**, implementation order: (1) repo layer + Alembic baseline + config/driver selection, (2) drones table + registry rehydration behind flag (delivers F1 exit criterion), (3) connection allow-list (closes F2), (4) flight detector + flights, (5) 1 Hz telemetry writer + retention, (6) commands_audit hook, (7) recordings metadata + object store, (8) provisioning tokens, (9) alerts/alert_rules tables (config only; firing logic is Phase 8).
+**On approval**, implementation order: (1) repo layer + Alembic baseline (all tables incl. the §4A additions) + config/driver selection, (2) drones table + registry rehydration behind flag (delivers F1 exit criterion), (3) connection allow-list (closes F2) + `connection_profiles` (§4A.1) + `drone_capabilities` (§4A.2), (4) flight detector + flights, (5) 1 Hz telemetry writer with **per-org `telemetry_persist_hz`** (§4A.4) + retention with **per-org windows** (§4A.4), (6) commands_audit hook, (7) recordings metadata + object store + config-only tables (`provisioning_tokens`, `alerts`/`alert_rules`, `mission_templates`/`mission_instances`/`mission_runs` §4A.3, `org_settings` §4A.4, `organization_feature_flags` §4A.5 — schema + thin repos; firing/execution/enforcement logic is Phase 8/5C+).
 
 *No code will be written until this document is reviewed and approved.*

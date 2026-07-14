@@ -71,6 +71,43 @@ class SessionRegistry:
         logger.info("Removed drone session %s", drone_id)
         return True
 
+    # ── persistence / rehydration (Phase 5B, ADR-001) ────────────────────────
+    async def load_from_db(self, drones_repo, *, org_id: Optional[str] = None) -> int:
+        """Rehydrate the registry from the drones table at boot — the F1 fix.
+
+        Recreates a DroneSession (RAM identity) for every non-archived drone
+        that isn't already present. Does NOT auto-connect here — reconnecting
+        auto_connect drones is the caller's staggered concern, so rehydration
+        stays fast and side-effect-free (no transport opened). Returns the
+        number of sessions rehydrated.
+        """
+        rows = await drones_repo.list_for_rehydrate(org_id=org_id)
+        rehydrated = 0
+        for row in rows:
+            drone_id = row["id"]
+            if drone_id in self._sessions:
+                continue  # e.g. the default session, already seeded at boot
+            try:
+                self.create(
+                    drone_id=drone_id,
+                    name=row.get("name"),
+                    connection_string=row.get("connection_string") or "auto",
+                    baudrate=row.get("baudrate") or 115200,
+                    udp_forwarding_endpoints=row.get("udp_forwarding") or None,
+                    metadata=row.get("metadata_json") or None,
+                )
+                rehydrated += 1
+            except ValueError:
+                logger.warning("rehydrate: drone_id %s already present, skipping", drone_id)
+        logger.info("Rehydrated %d drone session(s) from DB", rehydrated)
+        return rehydrated
+
+    def auto_connect_ids(self, drones_rows: List[Dict[str, Any]]) -> List[str]:
+        """drone_ids flagged auto_connect=1 — the caller reconnects these with
+        its own staggering/backoff (reusing the per-session reconnect proven at
+        10 drones)."""
+        return [r["id"] for r in drones_rows if r.get("auto_connect")]
+
     # ── views ────────────────────────────────────────────────────────────────
     @property
     def default(self) -> Optional[DroneSession]:

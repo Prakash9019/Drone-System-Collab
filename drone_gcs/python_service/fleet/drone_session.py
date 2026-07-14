@@ -50,6 +50,10 @@ class DroneSession:
         )
         self.mission_manager = MissionManager(self.link_manager)
         self.link_manager.mission_manager = self.mission_manager
+        # Tell the command manager which drone it belongs to so the Phase 5B
+        # audit hook can attribute each command (no-op when persistence is off).
+        if getattr(self.link_manager, "command_manager", None) is not None:
+            self.link_manager.command_manager.drone_id = self.drone_id
         self.parameter_manager = ParameterSyncManager(self.link_manager)
         self.link_manager.parameter_manager = self.parameter_manager
         self.preflight_manager = PreflightManager()

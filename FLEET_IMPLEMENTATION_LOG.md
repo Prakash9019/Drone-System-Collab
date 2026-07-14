@@ -74,3 +74,34 @@ Scope is **stabilization only** (per `FLEET_PHASE5_PRODUCTION_ARCHITECTURE_REVIE
 **Deliberately deferred to 5B+** — DB persistence & registry rehydration, auth/RBAC/CORS allow-list, `connection_string` allow-list (F2 dial-out), telemetry delta/rate-limit scale pass (F5/5D). Not started, per scope.
 
 **Rollback** — new files are additive; the `server.js`/`main.py`/`telemetry_pub.py` edits revert cleanly. Wire format unchanged; no schema. Requires `npm install` (prom-client) and `pip install prometheus-client`.
+
+---
+
+## Phase 5B — Persistence layer (durable core) — 2026-07-11
+
+**Single source of truth:** `FLEET_MASTER_ARCHITECTURE.md` §8 + `FLEET_PHASE5B_DATABASE_ARCHITECTURE.md` (§4A = the 6 approved additions). Python owns the DB (ADR-002); Node keeps **zero** DB deps (`package.json` untouched, verified). SQLAlchemy Core 2.0 + Alembic, Repository Pattern (ADR-003), SQLite default / PostgreSQL opt-in via `DATABASE_URL` (ADR-004). **Entire layer is dark unless `FLEET_PERSISTENCE_ENABLED=true`** — verified: with it unset, no DB file is created (even with `DATABASE_URL` set), `main.repo_hub` stays `None`, and the new persistence routes return 503. Zero breaking changes; `DroneSession`/`SessionRegistry` architecture unchanged; legacy unscoped routes and the "default" session/drone behave exactly as before.
+
+**New package `python_service/db/`**
+- `settings.py` — `DBSettings` from env (`DATABASE_URL`, `FLEET_PERSISTENCE_ENABLED`, `DB_AUTO_MIGRATE`, `TELEMETRY_PERSIST_HZ`, `TELEMETRY_PERSIST_QUEUE_MAX`, `RETENTION_*_DAYS`, `OBJECT_STORE_URL`); `sync_url()` for Alembic.
+- `schema.py` — ONE `MetaData`, 19 tables. `AutoPK = BigInteger().with_variant(Integer, "sqlite")` for high-volume append PKs (a plain BIGINT PK does **not** autoincrement on SQLite). 6 new models: `connection_profiles`, `drone_capabilities`, `mission_templates`/`mission_instances`/`mission_runs`, `org_settings`, `organization_feature_flags`.
+- `base.py` — async engine; on SQLite installs `PRAGMA foreign_keys=ON` + `journal_mode=WAL` + `busy_timeout` (so ON DELETE rules fire); `create_all`/`drop_all` for tests.
+- `migrate.py` + `migrations/` — Alembic. Baseline `0001_baseline` = `metadata.create_all(bind)` (never drifts from schema.py) + seeds default org/drone/active connection-profile/dev allow-list. **env.py uses `fileConfig(..., disable_existing_loggers=False)`** — else the app's JSON loggers go silent after the boot migration.
+- `repositories/` — drones, allowlist (mavutil connection-string parser + org allow-list, closes F2), connection_profiles (one active, mirrors `drones.connection_string`), capabilities, flights, telemetry (only file that knows partitioning/prune), org (settings + feature flags), retention, commands, missions, alerts, provisioning, recordings, objectstore (fs driver, path-escape guarded; S3 opt-in stub). `RepositoryHub` = one facade.
+- `services/` — flight_tracker (arm→disarm detection + rollup + link-loss/shutdown close), persistence_sampler (low-rate loop off the ZMQ path; drives flight detection + per-org-rate-gated telemetry writes), telemetry_writer (bounded deque, drop-oldest + metric, batched drain — never blocks), org_settings_resolver (per-org Hz/retention with TTL cache, env fallback), retention_manager (hourly, per-org windows, `retention_hold` exempt), command_audit (sink builder).
+
+**Integration seams (all additive, guarded)**
+- `main.py` lifespan — after the default session, if persistence enabled: bootstrap (migrate + engine + hub + object store), `SessionRegistry.load_from_db()` rehydrate (**F1 fix**), staggered auto-connect, start flight tracker + telemetry writer + sampler + retention manager, register the command-audit sink. Shutdown tears them down in order (closes open flights `end_reason=shutdown`, final writer flush, clears audit sink, disposes engine).
+- `fleet/routes.py` — registration is now DB-authoritative (allowlist gate → `drones.upsert` → connection-profile backfill; RAM rolled back on persist failure); deregister archives (soft-delete so it doesn't rehydrate). New routes: connection-profiles CRUD/activate, capabilities, flights history, telemetry track, org settings + feature flags, mission templates/instances/runs, alert rules + alerts, recordings, command audit. All new routes 503 when persistence is off.
+- `command_manager.py` — `execute_command` now wraps `_execute_command_core`; a process-wide `set_audit_sink` writes one `commands_audit` row per command on every route (NO_CONNECTION/accepted/timeout), capturing sysid/command/params/result/source_route + `flight_id` (from tracker); `operator_id` NULL until 5C. Audit failure never affects the command.
+- `fleet/drone_session.py` — sets `command_manager.drone_id` (harmless when off). `mavlink_link.py` — 4 command wrappers pass a `source_route` label.
+- `observability/metrics.py` — added `telemetry_persist_written_total`, `telemetry_persist_dropped_total`, `telemetry_persist_queue_depth`, `retention_rows_pruned_total{table}`, `retention_last_run_at`.
+
+**Deps (additive):** `SQLAlchemy[asyncio]==2.0.51`, `alembic==1.14.1`, `aiosqlite==0.22.1` (Postgres `asyncpg`/`psycopg2` and S3 `boto3` documented opt-ins). Node: none.
+
+**Tests — Python 90/90, Node 32/32.** New Python suites: `test_db_foundation` (schema/settings/Alembic baseline), `test_db_persistence` (drones repo, rehydration, allowlist incl. SSRF-reject), `test_db_profiles_capabilities`, `test_db_flights` (tracker + sampler), `test_db_telemetry_retention` (bounded writer drop-oldest, per-org rate gate, retention-hold), `test_db_command_audit`, `test_db_objectstore_config` (fs store, recordings, missions, alerts, tokens), `test_db_app_integration` (F1 restart-survives + allowlist-block + profiles/capabilities/org-settings/flags/templates through the real app). **Run app-boot tests with `ZMQ_PUB_PORT=5599`** — a live `python main.py` often holds 5556.
+
+**Exit criteria met:** F1 — registered drone survives a restart (verified end-to-end through the app). F2 — every `connection_string` validated against the org allow-list before `mavutil.mavlink_connection()` (SSRF `169.254.169.254` rejected). Every arm→disarm yields a flight; every command yields an audit row.
+
+**Rollback** — new files additive; edits to `main.py`/`fleet/*`/`command_manager.py`/`mavlink_link.py`/`observability/metrics.py`/`requirements.txt` revert cleanly. Pre-DB rollback point is the `fleet-phase5A` tag. Wire format unchanged. **Not committed — awaiting user approval.**
+
+**Deliberately deferred:** 5C (auth/RBAC/CORS — `users`/`operator_id` columns already present), 5D (telemetry delta/rate scale), Phase 8 (alert *firing* engine — tables + repos exist), mission *execution* wiring, S3 object-store driver, Postgres declarative partitioning (SQLite uses batched-delete prune now).
